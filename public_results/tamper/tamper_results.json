@@ -1,0 +1,193 @@
+{
+  "honest (SecAgg)": {
+    "trials": 1000,
+    "aborted": 0,
+    "rate": 0.0,
+    "reasons": {},
+    "mean_t_verify": 0.005632806301116944
+  },
+  "honest (VeriSketch)": {
+    "trials": 1000,
+    "aborted": 0,
+    "rate": 0.0,
+    "reasons": {},
+    "mean_t_verify": 0.006537557363510132
+  },
+  "AS: +1 unit on one coordinate": {
+    "trials": 1000,
+    "aborted": 1000,
+    "rate": 1.0,
+    "reasons": {
+      "verification": 1000
+    },
+    "mean_t_verify": 0.005588757038116455
+  },
+  "AS: error 2^60 on one coordinate (high valuation)": {
+    "trials": 1000,
+    "aborted": 1000,
+    "rate": 1.0,
+    "reasons": {
+      "verification": 1000
+    },
+    "mean_t_verify": 0.005492915868759155
+  },
+  "AS: error P-1 (wrap-around, = -1)": {
+    "trials": 1000,
+    "aborted": 1000,
+    "rate": 1.0,
+    "reasons": {
+      "verification": 1000
+    },
+    "mean_t_verify": 0.0051584625244140625
+  },
+  "AS: out-of-range value (+2^40)": {
+    "trials": 1000,
+    "aborted": 1000,
+    "rate": 1.0,
+    "reasons": {
+      "verification": 1000
+    },
+    "mean_t_verify": 0.004969493865966797
+  },
+  "AS: Gaussian perturbation (sd 1e-4)": {
+    "trials": 1000,
+    "aborted": 1000,
+    "rate": 1.0,
+    "reasons": {
+      "verification": 1000
+    },
+    "mean_t_verify": 0.0049234569072723385
+  },
+  "AS: scale aggregate by 0.5": {
+    "trials": 1000,
+    "aborted": 1000,
+    "rate": 1.0,
+    "reasons": {
+      "verification": 1000
+    },
+    "mean_t_verify": 0.005360755920410156
+  },
+  "AS: inject fabricated update": {
+    "trials": 1000,
+    "aborted": 1000,
+    "rate": 1.0,
+    "reasons": {
+      "verification": 1000
+    },
+    "mean_t_verify": 0.0048226981163024905
+  },
+  "AS: replay aggregate of another round": {
+    "trials": 1000,
+    "aborted": 1000,
+    "rate": 1.0,
+    "reasons": {
+      "verification": 1000
+    },
+    "mean_t_verify": 0.005264460325241089
+  },
+  "AS: drop a client's upload from the transcript": {
+    "trials": 1000,
+    "aborted": 1000,
+    "rate": 1.0,
+    "reasons": {
+      "receipt": 1000
+    },
+    "mean_t_verify": 0.0
+  },
+  "AS: misreport one client's public weight in the transcript": {
+    "trials": 1000,
+    "aborted": 1000,
+    "rate": 1.0,
+    "reasons": {
+      "receipt": 1000
+    },
+    "mean_t_verify": 0.0
+  },
+  "AN: open a coin share that does not match its commitment": {
+    "trials": 1000,
+    "aborted": 1000,
+    "rate": 1.0,
+    "reasons": {
+      "coin opening": 1000
+    },
+    "mean_t_verify": 0.0
+  },
+  "AS: sketch-kernel error (passes sketch cross-check)": {
+    "trials": 100,
+    "aborted": 100,
+    "rate": 1.0,
+    "reasons": {
+      "verification": 100
+    },
+    "mean_t_verify": 0.006585624217987061
+  },
+  "AN: omit one client's mask": {
+    "trials": 1000,
+    "aborted": 1000,
+    "rate": 1.0,
+    "reasons": {
+      "verification": 1000
+    },
+    "mean_t_verify": 0.005180669069290161
+  },
+  "AN: random mask sum": {
+    "trials": 1000,
+    "aborted": 1000,
+    "rate": 1.0,
+    "reasons": {
+      "verification": 1000
+    },
+    "mean_t_verify": 0.004992880821228027
+  },
+  "AN: balanced sketch forgery (+\u03b4 client a, \u2212\u03b4 client b)": {
+    "trials": 1000,
+    "aborted": 1000,
+    "rate": 1.0,
+    "reasons": {
+      "sketch self-check failed for clients [1, 2]": 1000
+    },
+    "mean_t_verify": 0.0
+  },
+  "AN: frame a client with a garbage sketch": {
+    "trials": 1000,
+    "aborted": 1000,
+    "rate": 1.0,
+    "reasons": {
+      "sketch self-check failed for clients [4]": 1000
+    },
+    "mean_t_verify": 0.0
+  },
+  "LIMITATION: AS error covered by a colluding client's share (SecAgg)": {
+    "trials": 1000,
+    "aborted": 0,
+    "rate": 0.0,
+    "reasons": {},
+    "mean_t_verify": 0.005487366914749146
+  },
+  "AS: out-of-range value (+2^40) with a colluding share": {
+    "trials": 1000,
+    "aborted": 1000,
+    "rate": 1.0,
+    "reasons": {
+      "range": 1000
+    },
+    "mean_t_verify": 0.005325117588043213
+  },
+  "AS: naive sketch-kernel error + colluding share (VeriSketch)": {
+    "trials": 100,
+    "aborted": 100,
+    "rate": 1.0,
+    "reasons": {
+      "range": 100
+    },
+    "mean_t_verify": 0.006543929576873779
+  },
+  "AN: second mask-sum query in the same round": {
+    "refused": true
+  },
+  "end-to-end abort leaves model unchanged": {
+    "round2_aborted": true,
+    "params_unchanged": true,
+    "round3_updates": true
+  }
+}

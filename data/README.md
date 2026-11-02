@@ -1,0 +1,1 @@
+Obtain the public datasets under their original terms and place them here as described in the main README. Raw text, row-level manifests and generated dataset files are not included in the public snapshot.

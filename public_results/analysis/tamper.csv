@@ -1,0 +1,22 @@
+scenario,trials,aborted,rate,reason
+honest (SecAgg),1000,0,0.0,
+honest (VeriSketch),1000,0,0.0,
+AS: +1 unit on one coordinate,1000,1000,1.0,verification (1000)
+AS: error 2^60 on one coordinate (high valuation),1000,1000,1.0,verification (1000)
+"AS: error P-1 (wrap-around, = -1)",1000,1000,1.0,verification (1000)
+AS: out-of-range value (+2^40),1000,1000,1.0,verification (1000)
+AS: Gaussian perturbation (sd 1e-4),1000,1000,1.0,verification (1000)
+AS: scale aggregate by 0.5,1000,1000,1.0,verification (1000)
+AS: inject fabricated update,1000,1000,1.0,verification (1000)
+AS: replay aggregate of another round,1000,1000,1.0,verification (1000)
+AS: drop a client's upload from the transcript,1000,1000,1.0,receipt (1000)
+AS: misreport one client's public weight in the transcript,1000,1000,1.0,receipt (1000)
+AN: open a coin share that does not match its commitment,1000,1000,1.0,coin opening (1000)
+AS: sketch-kernel error (passes sketch cross-check),100,100,1.0,verification (100)
+AN: omit one client's mask,1000,1000,1.0,verification (1000)
+AN: random mask sum,1000,1000,1.0,verification (1000)
+"AN: balanced sketch forgery (+δ client a, −δ client b)",1000,1000,1.0,"sketch self-check failed for clients [1, 2] (1000)"
+AN: frame a client with a garbage sketch,1000,1000,1.0,sketch self-check failed for clients [4] (1000)
+LIMITATION: AS error covered by a colluding client's share (SecAgg),1000,0,0.0,
+AS: out-of-range value (+2^40) with a colluding share,1000,1000,1.0,range (1000)
+AS: naive sketch-kernel error + colluding share (VeriSketch),100,100,1.0,range (100)
