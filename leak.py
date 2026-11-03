@@ -11,7 +11,9 @@ same weighting) and fits a regressor from views to label mixes.
 Attacked views (per client):
   sketch       the actual protocol sketch S_sigma(w_k Delta_k) / w_k, plus the public weight;
   aggregate    the released aggregate, the client's weight and its membership in the accepted
-               set; shadow federations are filtered with the same selection rule;
+               set; shadow federations are filtered with the protocol rule on their sketches under the
+               captured sketch map and aggregated with the same quantised weighting; the aggregate
+               feature set (output layer or full update) is chosen on held-out shadow federations;
   collusion    the AS with the K-1 other clients: for an accepted target the colluders subtract
                their own contributions from the aggregate and attack the isolated update with the
                plaintext attack; an excluded target is not in the aggregate, so the attack falls back
@@ -27,7 +29,7 @@ from common import *
 import fl, secagg as sa
 
 N_SHADOW = int(os.environ.get("N_SHADOW", 300))
-N_FED = 300
+N_FED = int(os.environ.get("N_FED", 300))
 ROUNDS_OBS = tuple(int(x) for x in os.environ.get("LEAK_ROUNDS", "1,10,20").split(","))
 CONFIGS = [dict(name="4x64", rows=4, width=64, eps=None), dict(name="4x64_eps2", rows=4, width=64, eps=2.0),
            dict(name="4x256", rows=4, width=256, eps=None)]
@@ -113,18 +115,34 @@ def run(seed, conf, cfgb):
             for k in feats_sh:
                 rec[f"{k}_mae"], rec[f"{k}_dom_acc"] = scores(truth, Reg(feats_sh[k], Ps)(feats_re[k]))
                 rec[f"{k}_shadow_holdout_mae"] = holdout_mae(feats_sh[k], Ps)
-            # aggregate view: shadow federations filtered with the same rule (exact distances), weighted aggregate
-            Xa, Pa = [], []
-            for fed in feds:
-                Uf = torch.tensor(SH[fed]); sel = fl.adaptive_select(Uf.norm(dim=1).numpy(), fl._pdist(Uf).numpy(), c["f_assumed"], Cu)
+            # aggregate view: shadow federations are filtered with the protocol rule on their sketches under the
+            # captured sketch map (same seed, same quantised weighting), and their aggregate is the quantised
+            # weighted mean of the accepted shadows.  The aggregate feature set (output layer or full update) is
+            # chosen on held-out shadow federations.
+            SKs = sh_sk.reshape(N_SHADOW, conf["rows"], conf["width"])
+            nrm = np.sqrt(np.median((SKs ** 2).sum(2), 1))
+            Qsh = np.stack([sa.to_signed(sa.encode(w_sh[j] * SH[j], B[j])) for j in range(N_SHADOW)]).astype(np.float64) / sa.SCALE
+            fe = {"out": [], "full": []}; Pa = []; fid = []
+            for q_, fed in enumerate(feds):
+                F = SKs[fed]; Dm = np.median(((F[:, None] - F[None]) ** 2).sum(3), 2)
+                sel = list(fl.adaptive_select(nrm[fed], Dm, c["f_assumed"], Cu, 1.5, 3.0, fixed=False))
                 wf = w_sh[fed]
-                ag = (wf[sel, None] * SH[fed][sel]).sum(0) / wf[sel].sum() if len(sel) else np.zeros(SH.shape[1])
-                for j in range(K):
-                    Xa.append(np.r_[out_layer(ag, head), wf[j], float(j in sel)]); Pa.append(Ps[fed[j]])
-            Xa, Pa = np.array(Xa), np.array(Pa)
+                ag = Qsh[fed][sel].sum(0) / wf[sel].sum() if len(sel) else np.zeros(SH.shape[1])
+                for jj in range(K):
+                    tail = [wf[jj], float(jj in sel)]
+                    fe["out"].append(np.r_[out_layer(ag, head), tail]); fe["full"].append(np.r_[ag, tail])
+                    Pa.append(Ps[fed[jj]]); fid.append(q_)
+            Pa, fid = np.array(Pa), np.array(fid)
+            hold = np.isin(fid, np.random.default_rng(seed).permutation(N_FED)[: N_FED // 5])
+            def fed_holdout(X):
+                m = Reg(X[~hold], Pa[~hold]); return float(np.abs(m(X[hold]) - Pa[hold]).mean())
             agg_np = view["U"] / w_real[A].sum()                           # released weighted mean of the accepted set
-            Xr = np.array([np.r_[out_layer(agg_np, head), w_real[k], float(k in A)] for k in range(K)])
+            Xr_all = {"out": np.array([np.r_[out_layer(agg_np, head), w_real[k], float(k in A)] for k in range(K)]),
+                      "full": np.array([np.r_[agg_np, w_real[k], float(k in A)] for k in range(K)])}
+            hmae = {k: fed_holdout(np.array(v)) for k, v in fe.items()}
+            best_a = min(hmae, key=hmae.get); Xa = np.array(fe[best_a]); Xr = Xr_all[best_a]
             ra = Reg(Xa, Pa); rec["aggregate_mae"], rec["aggregate_dom_acc"] = scores(truth, ra(Xr))
+            rec["aggregate_view"] = best_a; rec["aggregate_shadow_holdout_mae"] = hmae
             hist.setdefault("aggregate", []).append((Xa, Pa, Xr))
             # K-1 collusion: subtract the colluders' own contributions for an accepted target
             best_plain = min(("plain_full", "plain_out"), key=lambda k: rec[f"{k}_shadow_holdout_mae"])
@@ -172,3 +190,5 @@ if __name__ == "__main__":
     merged = sum((json.load(open(p)) for p in parts), [])
     if len({(r["config"], r["seed"]) for r in merged}) == len(CONFIGS) * len(seeds):
         save_json(merged, os.path.join(RES, "leak", "leak_results.json"))
+        from exp import provenance_side
+        save_json(provenance_side(["leak.py"]), os.path.join(RES, "leak", "leak_provenance.json"))

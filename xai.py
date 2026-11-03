@@ -123,6 +123,17 @@ def step_stability(model, tok, df, n=40):
     return pd.DataFrame(out)
 
 
+def checkpoint_provenance(c):
+    """Inputs of one explanation head: HateXplain data and features, the Kaggle-train normaliser, the encoder
+    weights (published hash), the run configuration and the training and explanation code."""
+    import hashlib
+    from exp import file_sha256, input_check
+    files = ["data/hatexplain_clean.jsonl", "features/hx_cls.npy", "features/kaggle_cls.npy", "data/kaggle_clean_v3.csv"]
+    return dict(inputs={f: file_sha256(os.path.join(ROOT, f)) for f in files}, inputs_match_published=input_check(),
+                code_sha256={f: file_sha256(os.path.join(ROOT, f)) for f in ("secagg.py", "fl.py", "common.py", "xai.py")},
+                config_sha256=hashlib.sha256(json.dumps(c, sort_keys=True, default=str).encode()).hexdigest())
+
+
 def main():
     from exp import BASE
     cfgb = json.load(open(CONFIG_FILE))
@@ -147,15 +158,19 @@ def main():
         for s in SEEDS[:3]:
             tag = f"eps{eps if eps else 'inf'}_s{s}"
             pth, hp = os.path.join(OUT, tag + "_cls.json"), os.path.join(OUT, tag + "_head.pt")
-            # checkpoint group: the head weights and the classification record are written together;
-            # if either is missing, both are regenerated
-            if not (os.path.exists(pth) and os.path.exists(hp)):
-                c = dict(BASE); c.update(cfgb); c.update(seed=s, agg="secagg", partition="iid", clip_update=cfgb["clip_update"])
-                if eps: c["lr"] = cfgb["dp_lr"]; c["dp"] = dict(epsilon=eps, delta=1e-5, clip=cfgb["dp_clip"], q=cfgb["dp_q"])
+            # checkpoint group: the head weights and the classification record (with its provenance) are written
+            # together; if either is missing or the provenance differs from the current inputs, configuration,
+            # encoder and code, the head is retrained and every artifact derived from it is deleted
+            c = dict(BASE); c.update(cfgb); c.update(seed=s, agg="secagg", partition="iid", clip_update=cfgb["clip_update"])
+            if eps: c["lr"] = cfgb["dp_lr"]; c["dp"] = dict(epsilon=eps, delta=1e-5, clip=cfgb["dp_clip"], q=cfgb["dp_q"])
+            prov = checkpoint_provenance(c)
+            ok = os.path.exists(pth) and os.path.exists(hp) and json.load(open(pth)).get("provenance") == prov
+            if not ok:
+                for f in (tag + "_xai.csv", f"ig_step_stability_{tag}.csv", tag + "_head.pt", tag + "_cls.json"):
+                    if os.path.exists(os.path.join(OUT, f)): os.remove(os.path.join(OUT, f))   # derived artifacts are stale
                 out, head, pred, prob = fl.run_fl(c, *d["train"], *d["val"], *d["test"], log=lambda *a: None)
+                out["provenance"] = prov
                 torch.save(head.params(), hp + ".tmp"); os.replace(hp + ".tmp", hp); save_json(out, pth)
-                for f in (tag + "_xai.csv",): 
-                    if os.path.exists(os.path.join(OUT, f)): os.remove(os.path.join(OUT, f))   # stale explanations
                 print(tag, out["test"]["macro_f1"], flush=True)
             head = fl.Head(768, cfgb["d_hidden"], 3, 0); head.W1, head.b1, head.W2, head.b2 = torch.load(hp)
             model = FullModel(enc, head, mu, sd)

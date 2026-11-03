@@ -4,93 +4,93 @@
     "aborted": 0,
     "rate": 0.0,
     "reasons": {},
-    "mean_t_verify": 0.005954341650009155
+    "mean_t_verify": 0.014963639974594116
   },
   "honest (VeriSketch)": {
     "trials": 1000,
     "aborted": 0,
     "rate": 0.0,
     "reasons": {},
-    "mean_t_verify": 0.0063857662677764895
+    "mean_t_verify": 0.016659504175186156
   },
   "AS: +1 unit on one coordinate": {
     "trials": 1000,
     "aborted": 1000,
     "rate": 1.0,
     "reasons": {
-      "verification": 1000
+      "AN verdict: challenge (check i)": 1000
     },
-    "mean_t_verify": 0.005902834177017212
+    "mean_t_verify": 0.014957701683044434
   },
   "AS: error 2^60 on one coordinate (high valuation)": {
     "trials": 1000,
     "aborted": 1000,
     "rate": 1.0,
     "reasons": {
-      "verification": 1000
+      "range (ii), clients; AN verdict: challenge (check i)": 1000
     },
-    "mean_t_verify": 0.005839175701141357
+    "mean_t_verify": 0.015025508642196655
   },
   "AS: error P-1 (wrap-around, = -1)": {
     "trials": 1000,
     "aborted": 1000,
     "rate": 1.0,
     "reasons": {
-      "verification": 1000
+      "AN verdict: challenge (check i)": 1000
     },
-    "mean_t_verify": 0.005923049449920654
+    "mean_t_verify": 0.015378077983856202
   },
   "AS: out-of-range value (+2^40)": {
     "trials": 1000,
     "aborted": 1000,
     "rate": 1.0,
     "reasons": {
-      "verification": 1000
+      "range (ii), clients; AN verdict: challenge (check i)": 1000
     },
-    "mean_t_verify": 0.005962295293807983
+    "mean_t_verify": 0.014370002508163452
   },
   "AS: Gaussian perturbation (sd 1e-4)": {
     "trials": 1000,
     "aborted": 1000,
     "rate": 1.0,
     "reasons": {
-      "verification": 1000
+      "AN verdict: challenge (check i)": 1000
     },
-    "mean_t_verify": 0.006219086885452271
+    "mean_t_verify": 0.015249841928482055
   },
   "AS: scale aggregate by 0.5": {
     "trials": 1000,
     "aborted": 1000,
     "rate": 1.0,
     "reasons": {
-      "verification": 1000
+      "AN verdict: challenge (check i)": 1000
     },
-    "mean_t_verify": 0.0059848747253417964
+    "mean_t_verify": 0.014872939825057984
   },
   "AS: inject fabricated update": {
     "trials": 1000,
     "aborted": 1000,
     "rate": 1.0,
     "reasons": {
-      "verification": 1000
+      "AN verdict: challenge (check i)": 1000
     },
-    "mean_t_verify": 0.006205747127532959
+    "mean_t_verify": 0.015486153125762939
   },
   "AS: replay the accepted aggregate of the previous round": {
     "trials": 1000,
     "aborted": 1000,
     "rate": 1.0,
     "reasons": {
-      "verification": 1000
+      "AN verdict: challenge (check i)": 1000
     },
-    "mean_t_verify": 0.005917155265808106
+    "mean_t_verify": 0.014382599830627441
   },
   "AS: replay the transcript of the previous round": {
     "trials": 1000,
     "aborted": 1000,
     "rate": 1.0,
     "reasons": {
-      "receipt": 1000
+      "receipt (clients)": 1000
     },
     "mean_t_verify": 0.0
   },
@@ -99,16 +99,25 @@
     "aborted": 1000,
     "rate": 1.0,
     "reasons": {
-      "coin opening": 1000
+      "coin opening (AS)": 1000
     },
     "mean_t_verify": 0.0
+  },
+  "AS: forged aggregate with a forged AN acceptance": {
+    "trials": 1000,
+    "aborted": 1000,
+    "rate": 1.0,
+    "reasons": {
+      "AN verdict: challenge (check i); AN verdict not authentic (clients)": 1000
+    },
+    "mean_t_verify": 0.014073884963989258
   },
   "AS: drop a client's upload from the transcript": {
     "trials": 1000,
     "aborted": 1000,
     "rate": 1.0,
     "reasons": {
-      "receipt": 1000
+      "receipt (clients)": 1000
     },
     "mean_t_verify": 0.0
   },
@@ -117,7 +126,7 @@
     "aborted": 1000,
     "rate": 1.0,
     "reasons": {
-      "receipt": 1000
+      "receipt (clients)": 1000
     },
     "mean_t_verify": 0.0
   },
@@ -126,7 +135,7 @@
     "aborted": 1000,
     "rate": 1.0,
     "reasons": {
-      "coin opening": 1000
+      "coin opening (AS)": 1000
     },
     "mean_t_verify": 0.0
   },
@@ -135,27 +144,27 @@
     "aborted": 100,
     "rate": 1.0,
     "reasons": {
-      "verification": 100
+      "range (ii), clients; AN verdict: challenge (check i)": 100
     },
-    "mean_t_verify": 0.006340065002441406
+    "mean_t_verify": 0.013817176818847657
   },
   "AN: omit one client's mask": {
     "trials": 1000,
     "aborted": 1000,
     "rate": 1.0,
     "reasons": {
-      "verification": 1000
+      "range (ii), clients; AS verdict: challenge (check i)": 1000
     },
-    "mean_t_verify": 0.005863494873046875
+    "mean_t_verify": 0.014250406503677367
   },
   "AN: random mask sum": {
     "trials": 1000,
     "aborted": 1000,
     "rate": 1.0,
     "reasons": {
-      "verification": 1000
+      "range (ii), clients; AS verdict: challenge (check i)": 1000
     },
-    "mean_t_verify": 0.005834526300430297
+    "mean_t_verify": 0.014040369510650635
   },
   "AN: balanced sketch forgery (+\u03b4 client a, \u2212\u03b4 client b)": {
     "trials": 1000,
@@ -180,28 +189,29 @@
     "aborted": 0,
     "rate": 0.0,
     "reasons": {},
-    "mean_t_verify": 0.006141303300857544
+    "mean_t_verify": 0.01387166142463684
   },
   "AS: out-of-range value (+2^40) with a colluding share": {
     "trials": 1000,
     "aborted": 1000,
     "rate": 1.0,
     "reasons": {
-      "range": 1000
+      "range (ii), clients": 1000
     },
-    "mean_t_verify": 0.0062722997665405275
+    "mean_t_verify": 0.014022253274917603
   },
   "AS: naive sketch-kernel error + colluding share (VeriSketch)": {
     "trials": 100,
     "aborted": 100,
     "rate": 1.0,
     "reasons": {
-      "range": 100
+      "range (ii), clients": 100
     },
-    "mean_t_verify": 0.007136669158935547
+    "mean_t_verify": 0.013632843494415283
   },
   "AN and client query enforcement": {
     "refused": {
+      "mask sum before the transcript digest": true,
       "second mask-sum query in the same attempt": true,
       "query under a fabricated round with stored seeds": true,
       "reuse of an attempt id": true,
@@ -210,9 +220,18 @@
       "duplicate identities (five copies of client 0)": true,
       "unknown identity": true,
       "set below ceil(K/2)": true,
+      "singleton set": true,
       "query from another session": true,
+      "coin opening before the transcript digest": true,
+      "challenge coin opening before the commitment": true,
+      "mask sketches before the sketch seed is fixed": true,
+      "enlarged mask sketch (8 x 512)": true,
+      "mask sum before the filtering step": true,
       "second mask-sketch request": true,
-      "client asked twice under the same identifiers": true
+      "client asked to open a round that the AN did not open": true,
+      "client asked for shares outside an open attempt (overlapping sets)": true,
+      "client asked to accept a set that the AN did not authorise": true,
+      "client asked for shares before the commitment and the authorised set": true
     },
     "all_refused": true
   },
@@ -225,5 +244,27 @@
     "trials": 100,
     "passed": 100,
     "aggregate_unchanged": 100
+  },
+  "provenance": {
+    "schema": 2,
+    "manifest_sha256": "1cd8231529b9ee92e20876005bc70208b456102011a1e357ff7d3bbc6b175e6b",
+    "features_sha256": "c3b210a3f6848cd45ef7868a9eada2c4bcc164488bc9096334d6708d25a5be5e",
+    "normaliser": {
+      "source": "HateXplain training split",
+      "stats_sha256": "38e370d1ee0b2777753ab259ec45145d364ada41b92324cc50ad00be3d14d435",
+      "inputs": {
+        "features/hx_cls.npy": "a85f65a0a37feaea984b79178629985a42ad6e9b3a035b7d365a7ff4f1ab8900",
+        "data/hatexplain_clean.jsonl": "c4bba79c04d8c7a429f9bd93bd38a712fa40ed2bdacb58ef7dab721c00b0acb8"
+      }
+    },
+    "inputs_match_published": true,
+    "code_sha256": {
+      "secagg.py": "34642710cb8885e3176a2460547314bf7c4b0b9fa684e4211e9a94ff389a9844",
+      "fl.py": "0b4ba35293e22d56783263b7f1d426a71afc4e4a62c4c4a5af6bb014074db633",
+      "common.py": "904dc3699afbf78a154cf60523836c17e3993e5114c67181b0b67adff0cba1da",
+      "tamper.py": "3a9efd37a3757c8c59d6f9da2bcfd37cdcc2810de010436c50437ef7851f5b3c"
+    },
+    "config_sha256": "ae6aa2654af5222daa399f00120064f5db1cfd06d11e19401b4c1748dd78f1b3",
+    "recorded": "at run time"
   }
 }

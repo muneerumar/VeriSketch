@@ -21,4 +21,5 @@ for s in near_dup_audit.py moderation.py sketch_fidelity.py leak.py xai.py tampe
   TORCH_THREADS=2 python $s || { echo "FAILED: $s" >&2; exit 1; }
 done
 TORCH_THREADS=2 python bench.py || exit 1
+python equivalence_check.py || { echo "FAILED: equivalence_check.py" >&2; exit 1; }
 echo "ALL DONE"

@@ -11,8 +11,25 @@ This repository holds the code and the aggregate results of every run. It does n
 manuscript, raw texts, row-level split manifests, per-example predictions, client partitions
 or model weights. The split and every run can be regenerated from the original datasets.
 
-The code is a research prototype. All parties run in one process without a network. The
-results do not certify the security of a deployment.
+The code is a research prototype. All parties run in one process without a network; each
+check is made by the party that owns it, with keys and state held per party, and messages are
+function calls. The results do not certify the security of a deployment.
+
+## Protocol checks in the code
+
+- A `SessionConfig` fixes members, dimension, sketch size, sketched coordinates, number of
+  challenges, release threshold, attempt limit and update bound. Every authenticated message
+  carries its hash.
+- The auxiliary node enforces the order of the steps, releases mask sketches only of the agreed
+  size, and releases one mask sum per attempt for a valid accepted set.
+- Clients take part only in attempts that the auxiliary node opened, answer only for the set it
+  authorised, derive the challenge themselves and answer once.
+- Clients send their verification shares to both servers. Each server gives its own
+  authenticated verdict; a client applies the aggregate only if it matches the commitment,
+  lies in the integer range and both verdicts accept.
+
+These checks refuse the malformed requests tested in `test_protocol.py` and `tamper.py`. They
+harden the implementation; they are not a proof of confidentiality against a malicious server.
 
 ## Contents
 
@@ -23,6 +40,7 @@ results do not certify the security of a deployment.
 | `data_prep.py` | corpus preparation, label-conflict removal, split, manifest regeneration and hash check |
 | `features.py` | frozen-encoder feature extraction (weights checked by SHA-256) |
 | `exp.py` | experiment grids; every result stores input and code hashes; failed or stale runs give a non-zero exit status |
+| `equivalence_check.py`, `legacy/`, `config/code_lineage.json` | the protocol code that produced the main grids, and a side-by-side test that the current code gives identical rounds and runs |
 | `tune.py`, `moderation.py`, `sketch_fidelity.py`, `leak.py`, `xai.py`, `tamper.py`, `bench.py`, `near_dup_audit.py` | side studies |
 | `test_secagg.py`, `test_protocol.py`, `test_dp.py`, `smoke_test.py` | unit, negative and boundary tests |
 | `analyze_local.py` | full analysis of locally regenerated results |
@@ -67,6 +85,18 @@ python analyze_local.py
 
 Masks, coins and DP noise come from the operating system's random source, so secure and DP runs
 are not bit-for-bit repeatable. Plaintext runs without DP are.
+
+## Provenance
+
+Main-grid results store, at run time, hashes of the split manifest, the Kaggle features, the
+protocol and training code and the run configuration. They were produced with the code in
+`legacy/`, before the party-local verdicts and request checks were added. `equivalence_check.py`
+runs both versions on the same inputs with the same sketch seed and records the code lineage in
+`config/code_lineage.json`; `exp.py` accepts these older records only if that lineage holds. The
+hash of the normaliser was added later and is checked retrospectively for those runs. The
+integrity, cost and leakage results were produced with the current code and carry their own
+provenance. The design-check, moderation, sketch-fidelity and explanation results were produced
+before provenance was recorded for them.
 
 ## Label-conflict policy
 

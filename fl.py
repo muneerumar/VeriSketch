@@ -231,20 +231,37 @@ def adaptive_select(norms, D, f, clip_u, norm_tau=1.5, mad_c=3.0, fixed=False):
 
 class SecureRound:
     """One session of masked aggregation over F_P (SecAgg-FedAvg, VeriSketch or VeriSketch-MK) with real
-    cryptography.  The AN object and its release state persist for the whole session.  run() executes one
-    attempt of one round and returns (aggregate or None if the round aborts, statistics).  The default
-    max_attempts=1 means an aborted round is not retried: the model stays unchanged and the next round
-    starts from new local updates."""
-    PROTOCOL_ABORTS = ("receipt", "coin opening", "sketch self-check", "verification", "range", "sketch consistency")
+    cryptography.  All parties run in one process, but each check is made by the party that owns it:
+    clients check receipts, coin openings, their own sketches, the commitment and the range; the AN and
+    the AS each give an authenticated verdict from the shares that the clients send to them; a client
+    applies the aggregate only if its own checks pass and both verdicts accept.  The session
+    configuration (dimension, sketch size, challenges, threshold, bound) is fixed at the first round.
+    The default max_attempts=1 means an aborted round is not retried."""
+    PROTOCOL_ABORTS = ("receipt", "coin opening", "sketch self-check", "verdict", "range", "commitment", "accepted set")
 
     def __init__(self, K, rows=4, width=64, sid=None, state_path=None, max_attempts=1):
         self.K, self.rows, self.width = K, rows, width
         self.sid = sid or os.urandom(16)
+        self.state_path, self.max_attempts = state_path, max_attempts
         self.clients = [sa.Client(i) for i in range(K)]
         pks = {c.cid: c.pk for c in self.clients}
         for c in self.clients: c.setup_pairwise(pks)
+        self.k_an = {i: os.urandom(32) for i in range(K)}           # authenticated client-AN channels
+        self.k_as = {i: os.urandom(32) for i in range(K)}           # authenticated client-AS channels
         self.min_release = (K + 1) // 2                                    # ceil(K/2)
-        self.AN = sa.AuxNode(self.sid, range(K), self.min_release, state_path, max_attempts)
+        self.cfg, self.AN = None, None
+
+    def _session(self, d, mode, kappa, clip_u, sub):
+        fam = "secagg" if mode == "secagg" else "verisketch"
+        if self.cfg is None:
+            self.cfg = sa.SessionConfig(self.sid, range(self.K), d, self.rows, self.width, sub, kappa, self.min_release,
+                                        self.max_attempts, clip_u, fam)
+            self.AN = sa.AuxNode(self.cfg, self.k_an, self.state_path)
+            for c in self.clients: c.register(self.cfg, self.k_an[c.cid], self.k_as[c.cid])
+        cfg = self.cfg
+        if (cfg.d, cfg.mode, cfg.kappa, cfg.clip_u, cfg.sub) != (d, fam, kappa, float(clip_u), (int(sub) if sub else None)):
+            raise ValueError("round parameters differ from the session configuration")
+        return cfg
 
     @staticmethod
     def int_bounds(w, clip_u):
@@ -254,13 +271,18 @@ class SecureRound:
     def run(self, ups, n, rnd, mode, f, clip_u, mad_c=3.0, norm_tau=1.5, tamper=None,
             sigma_mode="post_commit", sub=None, malicious=(), collude_share=None, kappa=1, att=0, capture=False):
         K, d = self.K, ups[0].numel(); sid = self.sid; tam = tamper or {}
-        AS, AN = sa.AggServer(), self.AN
+        cfg = self._session(d, mode, kappa, clip_u, sub); AN = self.AN
+        AS = sa.AggServer(cfg, self.k_as)
+        party = tam.get("party", "")
+        lies_as, lies_an = party.startswith("AS"), party.startswith("AN")      # a deviating server also reports acceptance
+        honest = [c for c in self.clients if c.cid not in malicious]
         nmax = float(max(n)); w = [float(x) / nmax for x in n]          # public weights in (0, 1]
         B = self.int_bounds(w, clip_u)
         st = dict(t_client_mask=0.0, t_sketch=0.0, t_unmask=0.0, t_verify=0.0, aborted=False, reason="", abort_kind="")
         def abort(reason, kind="protocol check"):
             st.update(aborted=True, reason=reason, abort_kind=kind, accepted=[]); return None, st
-        h1, h2 = AN.open_attempt(rnd, att, d)                              # AN coin commitments (attempt start)
+        h1, h2 = AN.open_attempt(rnd, att)                                 # AN coin commitments (attempt start)
+        for c in self.clients: c.open_attempt(rnd, att, h1, h2, AN.open_tags[c.cid])
         t = time.time()
         for c, u, wi, Bi in zip(self.clients, ups, w, B):
             v = np.float64(wi) * u.detach().double().numpy()             # weighting in float64
@@ -268,30 +290,36 @@ class SecureRound:
                 enc = np.mod(np.rint(np.nan_to_num(v) * sa.SCALE).astype(np.int64), sa.P).astype(np.uint64)
             else:
                 enc = sa.encode(v, Bi / sa.SCALE)
-            x, seed = c.mask_update(enc, sid, rnd, att)
+            x, seed = c.mask_update(enc)
             AS.receive(c.cid, x); AN.receive_seed(sid, rnd, att, c.cid, seed)
         st["t_client_mask"] = time.time() - t
         tr = AS.transcript(dict(enumerate(w)))
-        if tam.get("party") == "AS_transcript": tr = tam["fn"](tr)
+        if party == "AS_transcript": tr = tam["fn"](tr)
         D0 = sa.digest(sid, rnd, tr, att)
-        if not all(c.check_receipt(D0, tr, w[c.cid], sid, rnd, att) for c in self.clients): return abort("receipt")
+        okr = {c.cid: c.check_receipt(D0, tr, w[c.cid]) for c in self.clients}
+        if not all(okr[c.cid] for c in honest): return abort("receipt (clients)")
+        r_as1 = os.urandom(32); AN.receive_digest(sid, rnd, att, D0, r_as1)
         D = sa.H(D0, h1, h2)
         A = list(range(K)); S = None; cs = None
         if mode in ("verisketch", "verisketch_mk"):
             t = time.time()
-            # two-party coin: the AS contributes a fresh share with D, then the AN opens its committed share
-            r_as, r_an = os.urandom(32), AN.reveal_coin(0)
-            if not sa.check_coin(h1, b"coin1", r_an): return abort("coin opening")
-            sigma = sa.sketch_seed(sid, rnd, D, r_an + r_as, att) if sigma_mode == "post_commit" else predictable_sigma(rnd)
-            cs = sa.CountSketch(sigma, sub or d, self.rows, self.width)
+            r_an1 = AN.reveal_coin(0)                                     # the AN opens its committed share
+            if not sa.check_coin(h1, b"coin1", r_an1): return abort("coin opening (AS)")
             if sigma_mode == "post_commit":
-                MS = AN.mask_sketches(sid, rnd, att, D, r_as, self.rows, self.width, sub)
-            else:                                                          # ablation: AN sketches under the public seed
-                MS = {cc: cs(AN._mask(cc)[:sub] if sub else AN._mask(cc)) for cc in range(K)}
-            if tam.get("party") == "AN_sketch": MS = tam["fn"](MS)
-            S = AS.sketch_updates(cs, MS, sub)
-            # every client checks the sketch the AS publishes for it
-            bad = [c.cid for c in self.clients if not c.check_own_sketch(cs, S[c.cid]) and c.cid not in malicious]
+                sigma = sa.sketch_seed(sid, rnd, D, r_an1 + r_as1, att)
+                MS = AN.mask_sketches(sid, rnd, att)
+            else:                                                          # ablation: everyone uses the public seed
+                sigma = predictable_sigma(rnd); csp = sa.CountSketch(sigma, cfg.sub or d, self.rows, self.width)
+                MS = {cc: csp(AN._mask(cc)[:cfg.sub] if cfg.sub else AN._mask(cc)) for cc in range(K)}; AN.sketched.add((rnd, att))
+            cs = sa.CountSketch(sigma, cfg.sub or d, self.rows, self.width)
+            if party == "AN_sketch": MS = tam["fn"](MS)
+            S = AS.sketch_updates(cs, MS, cfg.sub)
+            # every client derives the seed itself and checks the sketch that the AS publishes for it
+            for c in self.clients:
+                if sigma_mode == "post_commit":
+                    if not c.receive_coin1(r_an1, r_as1, AN.coin1_tags[c.cid]) and c in honest: return abort("coin opening (clients)")
+                else: c.ctx["sigma"] = sigma
+            bad = [c.cid for c in honest if not c.check_own_sketch(S[c.cid])]
             if bad: st["t_sketch"] = time.time() - t; return abort(f"sketch self-check failed for clients {bad}")
             F = {i: cs.to_float(S[i]) / w[i] for i in S}
             norms = np.array([sa.sketch_sqnorm(F[i]) ** 0.5 for i in range(K)])
@@ -305,34 +333,57 @@ class SecureRound:
                 st["view"] = dict(sketch=np.stack([cs.to_float(S[i]).reshape(-1) for i in range(K)]), weights=list(w))
             if len(A) < self.min_release: return abort("accepted set below release threshold", "filter")
         t = time.time()
-        if tam.get("party") == "AN_query": tam["fn"](AN, sid, rnd, att, A)    # malformed-query probes
+        if party == "AN_query": tam["fn"](AN, sid, rnd, att, A)              # malformed-query probes
         M = AN.mask_sum(sid, rnd, att, A)
-        if tam.get("party") == "AN": M = tam["fn"](M, AN, A)
+        if party == "AN": M = tam["fn"](M, AN, A)
+        okA = {c.cid: c.receive_accepted(A, AN.accepted_tags[c.cid]) for c in self.clients}   # every client is told the set
+        if not all(okA[c.cid] for c in honest): return abort("accepted set (clients)")
         U = AS.unmask(A, M)
-        if tam.get("party") == "AS": U = tam["fn"](U, AS, A)
+        if party in ("AS", "AS_forge_AN_verdict") and "fn" in tam: U = tam["fn"](U, AS, A)
         st["t_unmask"] = time.time() - t
         t = time.time()
-        c = sa.aggregate_commitment(sid, rnd, A, U, att)                # AS commits and adds its coin share ...
-        r_as, r_an = os.urandom(32), AN.reveal_coin(1)                  # ... then the AN opens its committed share
-        if not sa.check_coin(h2, b"coin2", r_an): return abort("coin opening")
-        ok_v = True
-        for idx in range(kappa):                                        # kappa independent challenges
-            V = sa.verification_vector(sid, rnd, c, r_an + r_as, d, idx, att)
-            shares = [self.clients[i].ip_share(V, A, sid, rnd, idx, att) for i in A]
-            if collude_share is not None:                                # limitation test: colluding client offsets
-                shares[0] = (shares[0] + collude_share(U, V)) % sa.P
-            ok_v = ok_v and sa.verify_aggregate(U, V, shares)
-        ok_r = sa.in_range_int(U, sum(B[i] for i in A))                  # exact integer bound of the accepted set
-        ok_s = True
-        if S is not None:
-            tot = None
-            for i in A: tot = S[i] if tot is None else sa.fadd(tot, S[i])
-            ok_s = bool((cs(U[:sub] if sub else U) == tot).all())
+        cm = sa.aggregate_commitment(sid, rnd, A, U, att)               # AS commits and adds its coin share ...
+        r_as2 = os.urandom(32); AN.receive_commitment(sid, rnd, att, cm, r_as2)
+        r_an2 = AN.reveal_coin(1)                                       # ... then the AN opens its committed share
+        if not sa.check_coin(h2, b"coin2", r_an2): return abort("coin opening (AS)")
+        ok2 = {c.cid: c.receive_coin2(cm, r_an2, r_as2, AN.coin2_tags[c.cid]) for c in self.clients}
+        if not all(ok2[c.cid] for c in honest): return abort("coin opening (clients)")
+        offs = collude_share if isinstance(collude_share, dict) else ({0: collude_share} if collude_share else {})
+        sh_an, sh_as = {}, {}
+        for pos, i in enumerate(A):
+            cl = self.clients[i]; vals, t_an, t_as = cl.shares()
+            if pos in offs:                                            # a colluding client offsets its shares and MACs them
+                vals = [(v + offs[pos](U, sa.verification_vector(sid, rnd, cm, r_an2 + r_as2, d, idx, att))) % sa.P
+                        for idx, v in enumerate(vals)]
+                hdr = (cfg.hash, sa.ints(rnd, att, i), cm, sa.ints(*vals))
+                t_an, t_as = sa.mac(cl.k_an, b"share", *hdr), sa.mac(cl.k_as, b"share", *hdr)
+            sh_an[i], sh_as[i] = (vals, t_an), (vals, t_as)
+        v_an = AN.verdict(U, sh_an)
+        v_as = AS.verdict(rnd, att, A, cm, r_an2 + r_as2, U, sh_as, sum(B[i] for i in A), cs, S)
+        key = sa.ints(rnd, att)
+        # every check that an honest party makes and that fails (for reporting; the decision is the clients')
+        Bsum = sum(B[i] for i in A); det = []
+        if sa.aggregate_commitment(sid, rnd, A, U, att) != cm: det.append("commitment (clients)")
+        if not sa.in_range_int(U, Bsum): det.append("range (ii), clients")
+        if not lies_an and v_an[0][1]: det.append(f"AN verdict: {v_an[0][1]}")
+        if not lies_as and v_as[0][1]: det.append(f"AS verdict: {v_as[0][1]}")
+        if party == "AS_forge_AN_verdict": det.append("AN verdict not authentic (clients)")
+        st["detected_by"] = det
+        if lies_as:     # a deviating AS reports acceptance under its own keys
+            v_as = {k: (True, "", sa.mac(kk, b"verdict", cfg.hash, key, cm, b"\x01", b"")) for k, kk in self.k_as.items()}
+        if lies_an:
+            v_an = {k: (True, "", sa.mac(kk, b"verdict", cfg.hash, key, cm, b"\x01", b"")) for k, kk in self.k_an.items()}
+        if party == "AS_forge_AN_verdict":   # the AS replaces the AN's verdict; it does not hold the client-AN keys
+            v_an = {k: (True, "", sa.mac(os.urandom(32), b"verdict", cfg.hash, key, cm, b"\x01", b"")) for k in self.k_an}
+        decisions = [c.accept(U, v_an[c.cid], v_as[c.cid]) for c in honest]
         st["t_verify"] = time.time() - t
-        st.update(verified=ok_v, in_range=ok_r, sketch_consistent=ok_s, accepted=A,
-                  upload_bytes_per_client=d * 8 + 32, sketch_scalars=(self.rows * self.width if S is not None else 0))
-        if not (ok_v and ok_r and ok_s):
-            return abort("verification" if not ok_v else ("range" if not ok_r else "sketch consistency"))
+        why_an, why_as = AN.ph["verdict"][1], v_as[0][1]
+        st.update(verified=not why_an.startswith("challenge") and not why_as.startswith("challenge"),
+                  in_range=not why_as.startswith("range"), sketch_consistent=not why_as.startswith("sketch"), accepted=A,
+                  upload_bytes_per_client=d * 8 + 32, sketch_scalars=(self.rows * self.width if S is not None else 0),
+                  verdict_AN=why_an or "accept", verdict_AS=why_as or "accept")
+        bad = [why for ok, why in decisions if not ok]
+        if bad: return abort(bad[0])
         agg = torch.tensor(sa.decode(U) * nmax / float(sum(n[i] for i in A)), dtype=DT)
         if capture: st.setdefault("view", {}).update(accepted=list(A), weights=list(w), U=sa.decode(U))
         return agg, st

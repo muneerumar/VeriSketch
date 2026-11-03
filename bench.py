@@ -14,26 +14,37 @@ REPS = int(os.environ.get("BENCH_REPS", 20))
 
 
 def ledger(d, K, r, w, kappa=1, T=30, verisketch=True):
-    """Bytes per round per message type (A = all K clients accepted)."""
+    """Bytes per round per message type (A = all K clients accepted; 32-byte hashes, coins and MAC tags;
+    8-byte field elements and identifiers)."""
     tr = K * (8 + 8 + 32)                                         # transcript entry: id, public weight, upload hash
+    vs = 1 if verisketch else 0
     L = dict(
+        AN_to_client_attempt_opening=K * (2 * 32 + 32),           # coin commitments + MAC
+        AN_to_AS_coin_commitments=2 * 32,
         client_to_AS_masked_upload=K * d * 8,
         client_to_AN_mask_seed=K * 32,
         AS_to_client_transcript_and_digest=K * (tr + 32),
         client_to_AS_receipt_ack=K * 32,
-        AN_to_AS_coin_commitments=2 * 32,
-        AS_to_AN_digest_and_coin_shares=32 + 2 * 32,
-        AN_to_AS_coin_openings=2 * 32,
-        AN_to_AS_mask_sketches=(K * r * w * 8 if verisketch else 0),
-        AS_to_client_own_sketch=(K * r * w * 8 if verisketch else 0),
-        AS_to_AN_accepted_set=8 * K + 32,
+        AS_to_AN_digest_and_coin_share=32 + 32,
+        AN_to_AS_coin_opening_1=vs * 32,
+        AN_to_client_coin_opening_1=vs * K * (32 + 32 + 32),      # AN share, AS share, MAC
+        AN_to_AS_mask_sketches=vs * K * r * w * 8,
+        AS_to_client_own_sketch=vs * K * r * w * 8,
+        AS_to_AN_accepted_set=8 * K,
         AN_to_AS_mask_sum=d * 8,
-        AS_to_client_commitment_and_challenge_seed=K * (32 + 32 + 32),
-        client_to_AS_shares=K * 8 * kappa,
+        AN_to_client_authorised_set=K * (8 * K + 32),
+        AS_to_AN_commitment_and_coin_share=32 + 32,
+        AN_to_AS_coin_opening_2=32,
+        AN_to_client_commitment_and_coin_opening_2=K * (32 + 32 + 32 + 32),
+        client_to_AN_shares=K * (8 * kappa + 32),
+        client_to_AS_shares=K * (8 * kappa + 32),
+        AS_to_AN_aggregate=d * 8,
         AS_to_client_aggregate_broadcast=K * d * 8,               # clients update the model from this broadcast;
-    )                                                             # no separate model download is sent
+        AN_to_client_verdict=K * (1 + 32),                        # no separate model download is sent
+        AS_to_client_verdict=K * (1 + 32),
+    )
     L["total_round_B"] = sum(L.values())
-    L["setup_public_keys_once_B"] = K * 32 * (K - 1)
+    L["setup_public_keys_once_B"] = K * 32 * (K - 1) + K * 2 * 32  # pairwise X25519 keys and the two server channels
     L["setup_amortised_per_round_B"] = L["setup_public_keys_once_B"] / T
     L["plaintext_fedavg_round_B"] = K * d * 4 * 2                 # float32 upload + model download
     return L
@@ -91,4 +102,6 @@ if __name__ == "__main__":
     res = dict(platform=dict(system=platform.platform(), python=platform.python_version(), torch=torch.__version__,
                              cpu=cpu, cores=os.cpu_count(), torch_threads=torch.get_num_threads()),
                note="single-process simulation of all parties; no network", confidentiality=confidentiality(), runs=runs)
+    from exp import provenance_side
+    res["provenance"] = provenance_side(["bench.py"])
     save_json(res, os.path.join(RES, "bench", "bench.json"))

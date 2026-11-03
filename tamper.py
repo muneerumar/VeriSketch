@@ -3,8 +3,9 @@
 Every trial uses fresh masks, coins and challenges on realistic updates (one honest
 local-training round on the real features).  Scenarios: high-valuation errors, sketch-kernel
 errors, wrap-around and out-of-range values, replay, transcript manipulation, wrong coin
-openings, balanced auxiliary-node sketch forgeries, repeated mask-sum queries and, as tests of
-cases outside the guarantee, a colluding client that offsets its verification share.
+openings, balanced auxiliary-node sketch forgeries, malformed requests to the AN and to clients and,
+as tests of cases outside the guarantee, a colluding client that offsets its verification share.
+A deviating server also reports acceptance in its own verdict; detection must come from an honest party.
 Also an end-to-end check that an aborted round leaves the global model unchanged."""
 import os, json, time
 import numpy as np, torch
@@ -68,6 +69,7 @@ def main():
         "AS: replay the accepted aggregate of the previous round": dict(replay="aggregate"),
         "AS: replay the transcript of the previous round": dict(replay="transcript"),
         "AN: open a coin share of another session": dict(party="AN_coin_other", mode="verisketch"),
+        "AS: forged aggregate with a forged AN acceptance": dict(party="AS_forge_AN_verdict", fn=lambda U, AS, A: sa.fadd(U, one(1))),
         "AS: drop a client's upload from the transcript": dict(party="AS_transcript", fn=lambda tr: tr[1:]),
         "AS: misreport one client's public weight in the transcript": dict(party="AS_transcript",
                                                                            fn=lambda tr: [(cc, (w * 0.5 if cc == 3 else w), h) for cc, w, h in tr]),
@@ -90,6 +92,7 @@ def main():
         for t in range(ntr):
             tam = None
             if "fn" in spec: tam = dict(party=spec["party"], fn=spec["fn"])
+            elif spec.get("party") == "AS_forge_AN_verdict": tam = dict(party=spec["party"])
             if spec.get("replay"):
                 # an honest round with fresh updates first; its accepted aggregate / transcript is then replayed
                 # in the next round of the same session, whose clients send new updates
@@ -112,7 +115,8 @@ def main():
                 if spec["replay"] == "aggregate": tam = dict(party="AS", fn=lambda U, AS, A, R=rec: R["U"])
                 else: tam = dict(party="AS_transcript", fn=lambda tr, R=rec: R["tr"])
                 agg, st = sec.run(ups_b, n, rr + 1, mode, 3, c["clip_update"], tamper=tam)
-                if agg is None: flagged += 1; reasons[st["reason"]] = reasons.get(st["reason"], 0) + 1
+                if agg is None:
+                    flagged += 1; kk = "; ".join(st.get("detected_by") or [st["reason"]]); reasons[kk] = reasons.get(kk, 0) + 1
                 tv.append(st.get("t_verify", 0)); continue
             if spec.get("kernel"):
                 def kfn(U, AS, A, sec=sec):
@@ -133,15 +137,17 @@ def main():
                 orig_cs = sa.CountSketch
                 class Hook(orig_cs):
                     def __init__(s2, *a, **k):
-                        super().__init__(*a, **k); state["kernel"] = null_vector_mod_p(s2, seed=t)
+                        super().__init__(*a, **k)
+                        if state.get("ksig") != (a[0], t): state["kernel"] = null_vector_mod_p(s2, seed=t); state["ksig"] = (a[0], t)
                 sa.CountSketch = Hook
             if spec.get("party") in ("AN_coin", "AN_coin_other"):
                 orig_rev = sa.AuxNode.reveal_coin
                 if spec["party"] == "AN_coin":
                     sa.AuxNode.reveal_coin = lambda self2, i: os.urandom(32)
                 else:   # a valid opening, but of the coin committed in another session
-                    other = sa.AuxNode(os.urandom(16), range(c["K"]), 5); other.open_attempt(1, 0, 4)
-                    sa.AuxNode.reveal_coin = lambda self2, i, o=other, f=orig_rev: f(o, i)
+                    other = sa.AuxNode(sa.SessionConfig(os.urandom(16), range(c["K"]), dim, 4, 64, mode="verisketch"))
+                    other.open_attempt(1, 0)
+                    sa.AuxNode.reveal_coin = lambda self2, i, o=other: o._coins[i]
                 tam = None
             if spec.get("collude"):
                 # true aggregate of the accepted set is needed by the colluding client
@@ -155,38 +161,58 @@ def main():
                 if spec.get("kernel"): sa.CountSketch = orig_cs
                 if spec.get("collude"): sa.AggServer.unmask = orig_unmask
                 if spec.get("party") in ("AN_coin", "AN_coin_other"): sa.AuxNode.reveal_coin = orig_rev
-            if agg is None: flagged += 1; reasons[st["reason"]] = reasons.get(st["reason"], 0) + 1
+            if agg is None:
+                flagged += 1; kk = "; ".join(st.get("detected_by") or [st["reason"]]); reasons[kk] = reasons.get(kk, 0) + 1
             tv.append(st.get("t_verify", 0))
             if agg is not None and state.get("prev") is None and "honest" in name: pass
         res[name] = dict(trials=ntr, aborted=flagged, rate=flagged / ntr, reasons=reasons, mean_t_verify=float(np.mean(tv)))
         print(name, res[name], flush=True)
-    # malformed release queries to the AN (each must be refused)
+    # malformed requests to the AN and to clients (each must be refused)
     def refused(f, *a):
-        try: f(*a); return False
+        try: return f(*a) is False
         except PermissionError: return True
     sid = os.urandom(16)
-    def fresh():
-        AN = sa.AuxNode(sid, range(10), 5); AN.open_attempt(1, 0, 16)
+    def fresh(mode="secagg"):
+        cfgq = sa.SessionConfig(sid, range(10), 16, 4, 16, None, 1, 5, 1, 2.0, mode)
+        AN = sa.AuxNode(cfgq, {k: os.urandom(32) for k in range(10)}); AN.open_attempt(1, 0)
         for k in range(10): AN.receive_seed(sid, 1, 0, k, os.urandom(32))
         return AN
     q = {}
-    AN = fresh(); AN.mask_sum(sid, 1, 0, list(range(10)))
+    AN = fresh()
+    q["mask sum before the transcript digest"] = refused(AN.mask_sum, sid, 1, 0, list(range(10)))
+    AN.receive_digest(sid, 1, 0, b"D0", os.urandom(32)); AN.mask_sum(sid, 1, 0, list(range(10)))
     q["second mask-sum query in the same attempt"] = refused(AN.mask_sum, sid, 1, 0, list(range(9)))
     q["query under a fabricated round with stored seeds"] = refused(AN.mask_sum, sid, 2, 0, list(range(9)))
-    q["reuse of an attempt id"] = refused(AN.open_attempt, 1, 0, 16)
-    q["retry beyond the attempt limit"] = refused(AN.open_attempt, 1, 1, 16)
-    AN.open_attempt(3, 0, 16)
-    q["stale round"] = refused(AN.open_attempt, 2, 0, 16)
-    AN = fresh()
+    q["reuse of an attempt id"] = refused(AN.open_attempt, 1, 0)
+    q["retry beyond the attempt limit"] = refused(AN.open_attempt, 1, 1)
+    AN.open_attempt(3, 0)
+    q["stale round"] = refused(AN.open_attempt, 2, 0)
+    AN = fresh(); AN.receive_digest(sid, 1, 0, b"D0", os.urandom(32))
     q["duplicate identities (five copies of client 0)"] = refused(AN.mask_sum, sid, 1, 0, [0] * 5)
     q["unknown identity"] = refused(AN.mask_sum, sid, 1, 0, [0, 1, 2, 3, 77])
     q["set below ceil(K/2)"] = refused(AN.mask_sum, sid, 1, 0, [0, 1, 2, 3])
+    q["singleton set"] = refused(AN.mask_sum, sid, 1, 0, [0])
     q["query from another session"] = refused(AN.mask_sum, os.urandom(16), 1, 0, list(range(5)))
-    AN.mask_sketches(sid, 1, 0, b"D", os.urandom(32), 4, 16)
-    q["second mask-sketch request"] = refused(AN.mask_sketches, sid, 1, 0, b"D", os.urandom(32), 4, 16)
-    cl = sec.clients[0]; cl.answered = set(); V = sa.prg_field(os.urandom(32), dim)
-    cl.ip_share(V, list(range(10)), sec.sid, 999, 0, 0)
-    q["client asked twice under the same identifiers"] = refused(cl.ip_share, V, list(range(10)), sec.sid, 999, 0, 0)
+    AN = fresh("verisketch")
+    q["coin opening before the transcript digest"] = refused(AN.reveal_coin, 0)
+    AN.receive_digest(sid, 1, 0, b"D0", os.urandom(32))
+    q["challenge coin opening before the commitment"] = refused(AN.reveal_coin, 1)
+    q["mask sketches before the sketch seed is fixed"] = refused(AN.mask_sketches, sid, 1, 0)
+    AN.reveal_coin(0)
+    q["enlarged mask sketch (8 x 512)"] = refused(AN.mask_sketches, sid, 1, 0, 8, 512)
+    q["mask sum before the filtering step"] = refused(AN.mask_sum, sid, 1, 0, list(range(10)))
+    AN.mask_sketches(sid, 1, 0)
+    q["second mask-sketch request"] = refused(AN.mask_sketches, sid, 1, 0)
+    # clients: the overlapping-set extraction of the review (fabricated rounds, sets of 10 and 9 clients)
+    secq = fl.SecureRound(10); a0, _ = secq.run(ups, n, 1, "secagg", 3, c["clip_update"]); cl = secq.clients[0]; cq = secq.cfg
+    q["client asked to open a round that the AN did not open"] = refused(cl.open_attempt, 2, 0, b"h1", b"h2",
+                                                                          sa.mac(os.urandom(32), b"open", cq.hash, sa.ints(2, 0), b"h1", b"h2"))
+    q["client asked for shares outside an open attempt (overlapping sets)"] = refused(cl.shares)
+    ANq = secq.AN; h1, h2 = ANq.open_attempt(2, 0)
+    for cc in secq.clients: cc.open_attempt(2, 0, h1, h2, ANq.open_tags[cc.cid])
+    q["client asked to accept a set that the AN did not authorise"] = refused(cl.receive_accepted, list(range(1, 10)),
+                                                                               sa.mac(os.urandom(32), b"accepted", cq.hash, sa.ints(2, 0), sa.ints(*range(1, 10))))
+    q["client asked for shares before the commitment and the authorised set"] = refused(cl.shares)
     res["AN and client query enforcement"] = dict(refused=q, all_refused=all(q.values()))
     # end-to-end: an aborted round leaves the global model unchanged
     c2 = dict(c, agg="verisketch", T=3, eval_every=3, _record_params=True,
@@ -198,21 +224,17 @@ def main():
                                                           params_unchanged=h[0]["param_hash"] == h[1]["param_hash"],
                                                           round3_updates=h[1]["param_hash"] != h[2]["param_hash"])
     # scope of the share check: two accepted clients add +1 and -1 to their shares on an honest aggregate
-    orig_v = sa.verify_aggregate; passed = 0; same = 0
-    def vcancel(U, V, shares):
-        shares = list(shares); shares[0] = (shares[0] + 1) % P; shares[1] = (shares[1] - 1) % P
-        return orig_v(U, V, shares)
-    sa.verify_aggregate = vcancel
-    try:
-        sec = fl.SecureRound(c["K"]); ref = fl.SecureRound(c["K"])
-        for t in range(100):
-            a1, _ = sec.run(ups, n, t + 1, "secagg", 3, c["clip_update"]); a0, _ = ref.run(ups, n, t + 1, "secagg", 3, c["clip_update"])
-            passed += a1 is not None; same += bool(a1 is not None and torch.equal(a0, a1))
-    finally:
-        sa.verify_aggregate = orig_v
+    passed = 0; same = 0
+    sec = fl.SecureRound(c["K"]); ref = fl.SecureRound(c["K"])
+    for t in range(100):
+        a1, _ = sec.run(ups, n, t + 1, "secagg", 3, c["clip_update"], collude_share={0: lambda U, V: 1, 1: lambda U, V: P - 1})
+        a0, _ = ref.run(ups, n, t + 1, "secagg", 3, c["clip_update"])
+        passed += a1 is not None; same += bool(a1 is not None and torch.equal(a0, a1))
     res["SCOPE: cancelling share offsets (+1, -1) of two clients on an honest aggregate"] = dict(trials=100, passed=passed, aggregate_unchanged=same)
     print(res["end-to-end abort leaves model unchanged"], res["AN and client query enforcement"],
           res["SCOPE: cancelling share offsets (+1, -1) of two clients on an honest aggregate"])
+    from exp import provenance_side
+    res["provenance"] = provenance_side(["tamper.py"])
     save_json(res, os.path.join(RES, "tamper", "tamper_results.json"))
 
 

@@ -427,8 +427,9 @@ def _xai_frames():
 def t_xai():
     """XAI analysis.  For each eps against eps=inf: the mean difference, a two-stage bootstrap interval over
     trained models and posts, and a post-level Wilcoxon test that is conditional on the trained models
-    (Holm over eps x metric within a subset).  Common-correct posts (classified correctly by the averaged
-    models of both levels) form a sensitivity analysis on a prediction-selected subset."""
+    (Holm over eps x metric within a subset).  Common-correct posts are those that ALL three non-private
+    heads and ALL three private heads classify correctly (the mean of the binary correctness indicators is 1
+    at both levels); they form a sensitivity analysis on a prediction-selected subset."""
     fr = _xai_frames()
     if not fr: return {}
     METRICS = ["pred_ig_tf1_oracle", "pred_ig_tf1_budget", "pred_ig_auprc", "comprehensiveness", "sufficiency"]
@@ -530,7 +531,10 @@ def main():
     l, _ = t_leak(); print("\n== leak"); print(l.round(4).to_string())
     p, s = t_moderation(); print("\n== moderation"); print(s.round(4).to_string())
     x = t_xai()
-    if x: print("\n== xai"); print(x["tests"].round(4).to_string()); print(x["baselines"].round(4).to_string())
+    if x:
+        print("\n== xai"); print(x["tests"].round(4).to_string()); print(x["baselines"].round(4).to_string())
+        x["tests"].to_csv(os.path.join(OUT, "xai_tests.csv"), index=False)        # aggregate statistics only
+        x["baselines"].to_csv(os.path.join(OUT, "xai_baselines.csv"), index=False)
 
 
 if __name__ == "__main__":

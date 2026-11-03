@@ -85,7 +85,7 @@ def export_results(source,destination,manifest=None):
             o=json.loads(p.read_text());write(destination/group/p.name,export_run(o,labels));count+=1
     for folder,name in [('bench','bench.json'),('tamper','tamper_results.json'),
                         ('fidelity','sketch_fidelity.json'),('leak','leak_results.json'),
-                        ('moderation','moderation.json')]:
+                        ('moderation','moderation.json'),('leak','leak_provenance.json'),('.','equivalence.json')]:
         p=source/folder/name
         if p.exists():
             value=json.loads(p.read_text())

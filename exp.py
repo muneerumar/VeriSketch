@@ -104,37 +104,88 @@ def mia(head, d, n=5000):
                 gap_train_test_loss=float(ln.mean() - lm.mean()))
 
 
+_HASH = {}
 def file_sha256(p):
+    """SHA-256 of a file, cached per process by path, size and modification time."""
     import hashlib
+    st = os.stat(p); key = (os.path.abspath(p), st.st_size, st.st_mtime_ns)
+    if key in _HASH: return _HASH[key]
     h = hashlib.sha256()
     with open(p, "rb") as f:
         for b in iter(lambda: f.read(1 << 20), b""): h.update(b)
-    return h.hexdigest()
+    _HASH[key] = h.hexdigest(); return _HASH[key]
+
+
+_INPUTS = {}
+def input_check():
+    """Raw datasets and encoder files against the published hashes in PROVENANCE.json (computed once per process)."""
+    if "ok" not in _INPUTS:
+        pub = json.load(open(os.path.join(ROOT, "PROVENANCE.json")))
+        want = {**{k: v["sha256"] for k, v in pub["datasets"].items()}, **pub["model"]}
+        got = {k: (file_sha256(os.path.join(ROOT, k)) if os.path.exists(os.path.join(ROOT, k)) else None) for k in want}
+        _INPUTS["ok"] = all(got[k] == want[k] for k in want)
+        _INPUTS["mismatch"] = sorted(k for k in want if got[k] != want[k])
+    return _INPUTS["ok"]
+
+
+_NORM = {}
+def normaliser_record(feat="cls"):
+    """The standardisation actually applied to Kaggle features: HateXplain training-split statistics.
+    Hashes of the final mean and s.d. arrays and of their source files."""
+    import hashlib
+    if feat in _NORM: return _NORM[feat]
+    mu, sd = public_stats("hx", feat)
+    rec = dict(source="HateXplain training split", stats_sha256=hashlib.sha256(np.asarray(mu, np.float64).tobytes()
+                                                                             + np.asarray(sd, np.float64).tobytes()).hexdigest(),
+                inputs={f: file_sha256(os.path.join(ROOT, f)) for f in (f"features/hx_{feat}.npy", "data/hatexplain_clean.jsonl")})
+    _NORM[feat] = rec; return rec
 
 
 def provenance(cfg):
-    """Hashes that tie a result file to its inputs: split manifest, features, normaliser source,
-    protocol/training code and the exact run configuration."""
+    """Hashes that tie a result file to its inputs: split manifest, Kaggle features, normaliser (final
+    statistics and source files), raw inputs checked against PROVENANCE.json, protocol/training code
+    and the exact run configuration (schema 2)."""
     import hashlib
     feat = cfg.get("feat", "cls")
-    return dict(manifest_sha256=file_sha256(os.path.join(ROOT, "data", "split_manifest.csv")),
+    return dict(schema=2, manifest_sha256=file_sha256(os.path.join(ROOT, "data", "split_manifest.csv")),
                 features_sha256=file_sha256(os.path.join(ROOT, "features", f"kaggle_{feat}.npy")),
+                normaliser=normaliser_record(feat), inputs_match_published=input_check(),
                 code_sha256={f: file_sha256(os.path.join(ROOT, f)) for f in ("secagg.py", "fl.py", "common.py")},
                 config_sha256=hashlib.sha256(json.dumps(cfg, sort_keys=True, default=str).encode()).hexdigest())
+
+
+def provenance_side(scripts, cfg=None):
+    """Provenance for a side study: the main inputs plus the hashes of the study scripts."""
+    p = provenance(cfg or base()); p["code_sha256"].update({f: file_sha256(os.path.join(ROOT, f)) for f in scripts})
+    p["recorded"] = "at run time"; return p
+
+
+def legacy_ok(old, prov):
+    """Schema-1 records (written before the normaliser was hashed and before the protocol hardening).
+    Accepted only if manifest, features and configuration match, the record's code hashes equal the
+    legacy code in legacy/, the current code is the version that equivalence_check.py found to give
+    identical results, and the current normaliser equals the one recorded in config/code_lineage.json
+    (a retrospective check of this snapshot, not a hash stored at run time)."""
+    if not old or "schema" in old: return False
+    L = json.load(open(os.path.join(ROOT, "config", "code_lineage.json")))
+    return (all(old.get(k) == prov[k] for k in ("manifest_sha256", "features_sha256", "config_sha256"))
+            and old.get("code_sha256") == L["legacy_code_sha256"] and prov["code_sha256"] == L["current_code_sha256"]
+            and prov["normaliser"]["stats_sha256"] == L["normaliser_stats_sha256_retrospective"])
 
 
 def main():
     group = sys.argv[1]
     shard, nsh = (map(int, sys.argv[2].split("/")) if len(sys.argv) > 2 else (0, 1))
     runs = grid(group)[shard::nsh]
-    data_cache = {}; failed, stale, done = [], [], 0
+    data_cache = {}; failed, stale, done, legacy = [], [], 0, 0
     for name, cfg in runs:
         path = os.path.join(RES, group, name + ".json")
         prov = provenance(cfg)
         if os.path.exists(path):
             old = json.load(open(path)).get("provenance")
-            if old != prov: stale.append(name)                     # incompatible output: reported, never reused silently
-            else: done += 1
+            if old == prov: done += 1
+            elif legacy_ok(old, prov): done += 1; legacy += 1          # schema-1 record, lineage checked (see legacy_ok)
+            else: stale.append(name)                               # incompatible output: reported, never reused silently
             continue
         feat = cfg.get("feat", base().get("feat", "cls"))
         if feat not in data_cache: data_cache[feat] = load_kaggle(feat)
@@ -153,7 +204,7 @@ def main():
         save_json(out, path); done += 1
         print(f"[{group}] {name}: f1={out['test']['macro_f1']:.4f} tmr={out['test']['tmr']:.4f} "
               f"far={out['test']['far']:.4f} aborted={out['n_aborted']} ({time.time()-t:.0f}s)", flush=True)
-    print(f"[{group} {shard}/{nsh}] complete={done} failed={len(failed)} stale={len(stale)} of {len(runs)}", flush=True)
+    print(f"[{group} {shard}/{nsh}] complete={done} (schema-1 lineage={legacy}) failed={len(failed)} stale={len(stale)} of {len(runs)}", flush=True)
     for n_ in failed: print("FAILED", n_, flush=True)
     for n_ in stale: print("STALE (provenance mismatch, delete to rerun)", n_, flush=True)
     if failed or stale: sys.exit(1)
