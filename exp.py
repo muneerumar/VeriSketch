@@ -154,10 +154,34 @@ def provenance(cfg):
                 config_sha256=hashlib.sha256(json.dumps(cfg, sort_keys=True, default=str).encode()).hexdigest())
 
 
-def provenance_side(scripts, cfg=None):
-    """Provenance for a side study: the main inputs plus the hashes of the study scripts."""
+def require_inputs():
+    """Stop before any run or cache reuse if a raw dataset or encoder file differs from PROVENANCE.json."""
+    if not input_check():
+        print("INPUT CHECK FAILED: these files differ from PROVENANCE.json:", ", ".join(_INPUTS["mismatch"]), flush=True)
+        sys.exit(2)
+
+
+def provenance_side(scripts, cfg=None, settings=None):
+    """Provenance for a side study: the main inputs, the hashes of the study scripts and its settings."""
+    require_inputs()
     p = provenance(cfg or base()); p["code_sha256"].update({f: file_sha256(os.path.join(ROOT, f)) for f in scripts})
-    p["recorded"] = "at run time"; return p
+    p["settings"] = settings or {}; p["recorded"] = "at run time"; return p
+
+
+def sidecar(path):
+    return path[:-5] + "_provenance.json" if path.endswith(".json") else path + ".provenance.json"
+
+
+def save_with_provenance(obj, path, scripts, settings=None):
+    """Write a side-study output together with the provenance of the run that produced it."""
+    save_json(obj, path); save_json(provenance_side(scripts, settings=settings), sidecar(path))
+
+
+def cached_ok(path, scripts, settings=None):
+    """A cached side-study output may be reused only if its stored provenance equals the current one."""
+    sc = sidecar(path)
+    return (os.path.exists(path) and os.path.exists(sc)
+            and json.load(open(sc)) == json.loads(json.dumps(provenance_side(scripts, settings=settings))))
 
 
 def legacy_ok(old, prov):
@@ -166,7 +190,7 @@ def legacy_ok(old, prov):
     legacy code in legacy/, the current code is the version that equivalence_check.py found to give
     identical results, and the current normaliser equals the one recorded in config/code_lineage.json
     (a retrospective check of this snapshot, not a hash stored at run time)."""
-    if not old or "schema" in old: return False
+    if not old or "schema" in old or not prov.get("inputs_match_published"): return False
     L = json.load(open(os.path.join(ROOT, "config", "code_lineage.json")))
     return (all(old.get(k) == prov[k] for k in ("manifest_sha256", "features_sha256", "config_sha256"))
             and old.get("code_sha256") == L["legacy_code_sha256"] and prov["code_sha256"] == L["current_code_sha256"]
@@ -177,6 +201,7 @@ def main():
     group = sys.argv[1]
     shard, nsh = (map(int, sys.argv[2].split("/")) if len(sys.argv) > 2 else (0, 1))
     runs = grid(group)[shard::nsh]
+    require_inputs()                                           # no run and no cache reuse with changed inputs
     data_cache = {}; failed, stale, done, legacy = [], [], 0, 0
     for name, cfg in runs:
         path = os.path.join(RES, group, name + ".json")

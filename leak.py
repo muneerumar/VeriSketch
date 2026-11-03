@@ -173,22 +173,50 @@ def run(seed, conf, cfgb):
     return out
 
 
+def job_provenance(conf, seed):
+    """Provenance of one leakage job: inputs, code (leak.py and the protocol), configuration and study settings."""
+    from exp import provenance_side
+    return provenance_side(["leak.py"], settings=dict(config=conf, seed=seed, n_shadow=N_SHADOW, n_fed=N_FED,
+                                                      rounds=list(ROUNDS_OBS)))
+
+
+def job_complete(records, conf, seed):
+    """All expected observation points of a job: every observed round and the combined view."""
+    have = {str(r["round"]) for r in records if r["config"] == conf["name"] and r["seed"] == seed}
+    return have == {str(r) for r in ROUNDS_OBS} | {"multi"}
+
+
 if __name__ == "__main__":
     cfgb = json.load(open(CONFIG_FILE))
     shard, nsh = (map(int, sys.argv[1].split("/")) if len(sys.argv) > 1 else (0, 1))
     path = os.path.join(RES, "leak", os.environ.get("LEAK_OUT", f"leak_part{shard}of{nsh}.json"))
-    allr = json.load(open(path)) if os.path.exists(path) else []
-    done = {(r["config"], r["seed"]) for r in allr}
+    # part file: {"jobs": {job: provenance}, "records": [...]}.  A cached job is reused only if its stored
+    # provenance (inputs, code, settings) equals the current one and all its observation points are present.
+    st = json.load(open(path)) if os.path.exists(path) else {}
+    if not isinstance(st, dict): st = {}                       # older list format carries no provenance: recompute
+    jobs_prov, records = st.get("jobs", {}), st.get("records", [])
     seeds = SEEDS[: int(os.environ.get("LEAK_SEEDS", 5))]
     jobs = [(conf, s) for conf in CONFIGS for s in seeds][shard::nsh]
     for conf, s in jobs:
-        if (conf["name"], s) in done: continue
-        allr += run(s, conf, cfgb)
-        save_json(allr, path)
-    import glob as _g                                   # merge the parts once all jobs of all shards are done
-    parts = sorted(_g.glob(os.path.join(RES, "leak", f"leak_part*of{nsh}.json")))
-    merged = sum((json.load(open(p)) for p in parts), [])
-    if len({(r["config"], r["seed"]) for r in merged}) == len(CONFIGS) * len(seeds):
+        key = f"{conf['name']}|{s}"; prov = job_provenance(conf, s)
+        if jobs_prov.get(key) == json.loads(json.dumps(prov)) and job_complete(records, conf, s): continue
+        records = [r for r in records if not (r["config"] == conf["name"] and r["seed"] == s)]   # stale or partial
+        jobs_prov.pop(key, None)
+        records += run(s, conf, cfgb); jobs_prov[key] = prov
+        save_json(dict(jobs=jobs_prov, records=records), path)
+    import glob as _g                                   # merge the parts once all jobs of all shards are valid
+    merged, mprov = [], {}
+    for p in sorted(_g.glob(os.path.join(RES, "leak", f"leak_part*of{nsh}.json"))):
+        q = json.load(open(p))
+        if not isinstance(q, dict): continue
+        for key, pv in q.get("jobs", {}).items():
+            name, seed = key.split("|"); conf = next(c for c in CONFIGS if c["name"] == name)
+            if pv == json.loads(json.dumps(job_provenance(conf, int(seed)))) and job_complete(q["records"], conf, int(seed)):
+                mprov[key] = pv
+                merged += [r for r in q["records"] if r["config"] == name and r["seed"] == int(seed)]
+    if len(mprov) == len(CONFIGS) * len(seeds):
         save_json(merged, os.path.join(RES, "leak", "leak_results.json"))
-        from exp import provenance_side
-        save_json(provenance_side(["leak.py"]), os.path.join(RES, "leak", "leak_provenance.json"))
+        save_json(dict(jobs=mprov, note="provenance stored by each job when it was computed"),
+                  os.path.join(RES, "leak", "leak_provenance.json"))
+    else:
+        print(f"leak: {len(mprov)} of {len(CONFIGS) * len(seeds)} jobs valid; leak_results.json not written", flush=True)

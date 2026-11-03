@@ -71,7 +71,8 @@ def main():
                 rec["pr"] = [pr_[::k].tolist(), rc_[::k].tolist()]
                 fpr, tpr, _ = roc_curve(yt, st); rec["roc"] = [fpr[::max(1, len(fpr) // 200)].tolist(), tpr[::max(1, len(tpr) // 200)].tolist()]
                 out.append(rec); print(s, agg, eps, round(rec["roc_auc"], 4), rec["points"][1], flush=True)
-                save_json(out, os.path.join(RES, "moderation", "moderation.json"))
+                from exp import save_with_provenance
+                save_with_provenance(out, os.path.join(RES, "moderation", "moderation.json"), ["moderation.py"])
 
 
 if __name__ == "__main__":

@@ -51,7 +51,8 @@ def main():
                     agg = (torch.tensor([len(p) for p in parts], dtype=torch.float32)[:, None] * torch.stack(ups)).sum(0) / sum(len(p) for p in parts)
                     head.set_flat(head.flat() + agg)
                 print(seed, part, atk, flush=True)
-                save_json(rows, os.path.join(RES, "fidelity", "sketch_fidelity.json"))
+                from exp import save_with_provenance
+                save_with_provenance(rows, os.path.join(RES, "fidelity", "sketch_fidelity.json"), ["sketch_fidelity.py"])
 
 
 if __name__ == "__main__":

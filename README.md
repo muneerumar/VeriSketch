@@ -95,8 +95,13 @@ runs both versions on the same inputs with the same sketch seed and records the 
 `config/code_lineage.json`; `exp.py` accepts these older records only if that lineage holds. The
 hash of the normaliser was added later and is checked retrospectively for those runs. The
 integrity, cost and leakage results were produced with the current code and carry their own
-provenance. The design-check, moderation, sketch-fidelity and explanation results were produced
-before provenance was recorded for them.
+provenance, written at run time. A cached leakage job is reused only if its stored provenance and
+study settings (shadow clients, shadow federations, observed rounds, seed) match and all its
+observation points are present. `tune.py`, `moderation.py` and `sketch_fidelity.py` now write a
+`*_provenance.json` file next to their outputs, and `xai.py` records provenance with each trained
+head and deletes the head and its derived files when it differs. The published design-check,
+moderation, sketch-fidelity and explanation results were produced before these records existed.
+Every runner stops if a raw dataset or encoder file differs from `PROVENANCE.json`.
 
 ## Label-conflict policy
 
