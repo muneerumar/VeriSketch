@@ -38,6 +38,7 @@ def op_point(s_val, y_val, s_te, y_te, rule, argmax_te=None):
 
 
 def main():
+    from exp import require_inputs; require_inputs()
     cfgb = json.load(open(CONFIG_FILE))
     d = load_kaggle("cls"); out = []
     # second source: HateXplain test posts (Gab/Twitter, different annotation scheme), mapped to

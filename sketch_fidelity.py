@@ -12,6 +12,7 @@ SKETCHES = ((1, 16), (2, 32), (4, 16), (4, 64), (4, 256), (8, 128))
 
 
 def main():
+    from exp import require_inputs; require_inputs()
     cfgb = json.load(open(CONFIG_FILE))
     d = load_kaggle("cls"); Xtr, ytr = d["train"]; rows = []
     for seed in SEEDS[:3]:

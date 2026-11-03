@@ -98,10 +98,13 @@ integrity, cost and leakage results were produced with the current code and carr
 provenance, written at run time. A cached leakage job is reused only if its stored provenance and
 study settings (shadow clients, shadow federations, observed rounds, seed) match and all its
 observation points are present. `tune.py`, `moderation.py` and `sketch_fidelity.py` now write a
-`*_provenance.json` file next to their outputs, and `xai.py` records provenance with each trained
-head and deletes the head and its derived files when it differs. The published design-check,
-moderation, sketch-fidelity and explanation results were produced before these records existed.
-Every runner stops if a raw dataset or encoder file differs from `PROVENANCE.json`.
+`*_provenance.json` file next to their outputs. `xai.py` records provenance with each trained
+head and retrains a head whose provenance differs; each explanation output carries a cache key
+(`*.key`) built from its head, its attribution settings (integration steps, evaluation sample,
+budget, bins) and the explanation code, and is recomputed when the key changes. The published
+design-check, moderation, sketch-fidelity and explanation results were produced before these
+records existed. Every runner checks the raw datasets and encoder files against
+`PROVENANCE.json` at start-up and stops on a mismatch.
 
 ## Label-conflict policy
 

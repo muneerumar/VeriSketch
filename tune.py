@@ -4,6 +4,7 @@ import json, os, sys, glob, datetime, numpy as np
 from common import *
 import fl
 from exp import BASE, save_with_provenance, cached_ok
+from exp import require_inputs; require_inputs()      # stop before any run or cache reuse
 shard, nsh = (map(int, sys.argv[1].split("/")) if len(sys.argv) > 1 else (0, 1))
 d = load_kaggle("cls"); base = dict(BASE); base.update(json.load(open(CONFIG_FILE)))
 grid = [(dh, dp, lr) for dh in (16, 32, 128) for dp in (None, 2.0) for lr in ((1e-3, 3e-4) if dp is None else (3e-3, 1e-3))]

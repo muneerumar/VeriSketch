@@ -87,6 +87,8 @@ def confidentiality(d=12406, n_trials=20):
 
 
 if __name__ == "__main__":
+    if not (len(sys.argv) > 1 and sys.argv[1] == "--one"):
+        from exp import require_inputs; require_inputs()
     if len(sys.argv) > 1 and sys.argv[1] == "--one":
         print(json.dumps(one(*[int(x) for x in sys.argv[2:7]]))); sys.exit(0)
     cfgs = [(12406, 10, 4, 64, 1), (595206, 10, 4, 64, 1), (2_000_000, 10, 4, 64, 1),

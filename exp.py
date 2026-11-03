@@ -174,7 +174,8 @@ def sidecar(path):
 
 def save_with_provenance(obj, path, scripts, settings=None):
     """Write a side-study output together with the provenance of the run that produced it."""
-    save_json(obj, path); save_json(provenance_side(scripts, settings=settings), sidecar(path))
+    prov = provenance_side(scripts, settings=settings)     # validates the inputs before anything is written
+    save_json(obj, path); save_json(prov, sidecar(path))
 
 
 def cached_ok(path, scripts, settings=None):

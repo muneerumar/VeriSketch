@@ -187,6 +187,7 @@ def job_complete(records, conf, seed):
 
 
 if __name__ == "__main__":
+    from exp import require_inputs; require_inputs()
     cfgb = json.load(open(CONFIG_FILE))
     shard, nsh = (map(int, sys.argv[1].split("/")) if len(sys.argv) > 1 else (0, 1))
     path = os.path.join(RES, "leak", os.environ.get("LEAK_OUT", f"leak_part{shard}of{nsh}.json"))

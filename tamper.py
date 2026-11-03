@@ -43,6 +43,7 @@ def null_vector_mod_p(cs, seed=0):
 
 
 def main():
+    from exp import require_inputs; require_inputs()
     cfgb = json.load(open(CONFIG_FILE))
     from exp import BASE
     c = dict(BASE); c.update(cfgb); c.update(seed=42, partition="iid", agg="fedavg")

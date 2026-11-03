@@ -124,18 +124,38 @@ def step_stability(model, tok, df, n=40):
 
 
 def checkpoint_provenance(c):
-    """Inputs of one explanation head: HateXplain data and features, the Kaggle-train normaliser, the encoder
-    weights (published hash), the run configuration and the training and explanation code."""
+    """Inputs of one trained head: HateXplain data and features, the Kaggle-train normaliser source, the run
+    configuration and the training code.  (The encoder and raw inputs are checked by require_inputs first.)"""
     import hashlib
-    from exp import file_sha256, input_check
+    from exp import file_sha256
     files = ["data/hatexplain_clean.jsonl", "features/hx_cls.npy", "features/kaggle_cls.npy", "data/kaggle_clean_v3.csv"]
-    return dict(inputs={f: file_sha256(os.path.join(ROOT, f)) for f in files}, inputs_match_published=input_check(),
-                code_sha256={f: file_sha256(os.path.join(ROOT, f)) for f in ("secagg.py", "fl.py", "common.py", "xai.py")},
+    return dict(inputs={f: file_sha256(os.path.join(ROOT, f)) for f in files}, inputs_match_published=True,
+                code_sha256={f: file_sha256(os.path.join(ROOT, f)) for f in ("secagg.py", "fl.py", "common.py")},
                 config_sha256=hashlib.sha256(json.dumps(c, sort_keys=True, default=str).encode()).hexdigest())
 
 
+def attribution_key(head_prov, settings, kind):
+    """Cache key of an explanation output: the provenance of the head it explains, the attribution settings
+    (integration steps, evaluation sample, budget, bins, seed) and the explanation code."""
+    import hashlib
+    from exp import file_sha256
+    return hashlib.sha256(json.dumps(dict(head=head_prov, settings=settings, kind=kind,
+                                          code=file_sha256(os.path.join(ROOT, "xai.py"))), sort_keys=True, default=str).encode()).hexdigest()
+
+
+def cached(path, key):
+    kp = path + ".key"
+    return os.path.exists(path) and os.path.exists(kp) and open(kp).read().strip() == key
+
+
+def write_cached(df, path, key):
+    df.to_csv(path + ".tmp", index=False); os.replace(path + ".tmp", path)
+    with open(path + ".key", "w") as f: f.write(key)
+
+
 def main():
-    from exp import BASE
+    from exp import BASE, require_inputs
+    require_inputs()                                   # stop before loading data or the encoder if an input differs
     cfgb = json.load(open(CONFIG_FILE))
     d = load_hx("cls"); df = d["df"]; mu, sd = d["norm"]
     tok = DistilBertTokenizerFast.from_pretrained(MD)
@@ -150,9 +170,12 @@ def main():
     budget = float(np.mean([np.mean(r) for r in val.rationale]))          # fixed rationale budget from validation
     lens = [len(tok(list(w), is_split_into_words=True)["input_ids"]) for w in ev.tokens]
     os.makedirs(OUT, exist_ok=True)
-    json.dump(dict(n_eval=len(ev), pool=len(pool), budget_fraction=budget, max_subword_len=int(max(lens)),
-                   truncated_posts=int(sum(l > 128 for l in lens)), steps=STEPS),
-              open(os.path.join(OUT, "xai_meta.json"), "w"), indent=1)
+    meta = dict(n_eval=len(ev), pool=len(pool), budget_fraction=budget, max_subword_len=int(max(lens)),
+                truncated_posts=int(sum(l > 128 for l in lens)), steps=STEPS)
+    import hashlib
+    # settings that determine the explanations; part of every explanation cache key
+    SET = dict(steps=STEPS, n_eval=N_EVAL, bins=list(BINS), budget=budget,
+               eval_posts=hashlib.sha256(json.dumps([list(t) for t in ev.tokens]).encode()).hexdigest())
     order = EPS[::-1] if os.environ.get("XAI_REVERSE") else EPS
     for eps in order:
         for s in SEEDS[:3]:
@@ -175,13 +198,18 @@ def main():
             head = fl.Head(768, cfgb["d_hidden"], 3, 0); head.W1, head.b1, head.W2, head.b2 = torch.load(hp)
             model = FullModel(enc, head, mu, sd)
             xp = os.path.join(OUT, tag + "_xai.csv")
-            if not os.path.exists(xp):
+            kx = attribution_key(prov, dict(SET, seed=s, gold=(s == SEEDS[0])), "attributions")
+            if not cached(xp, kx):                    # new head, or changed steps, sample, budget, bins or code
                 res = evaluate(model, tok, ev, budget, np.random.default_rng(s), gold_too=(s == SEEDS[0]))
-                res.to_csv(xp + ".tmp", index=False); os.replace(xp + ".tmp", xp)
+                write_cached(res, xp, kx)
                 print(tag, "done", res[["pred_ig_tf1_oracle", "pred_ig_tf1_budget", "comprehensiveness"]].mean().round(4).to_dict(), flush=True)
             sp = os.path.join(OUT, f"ig_step_stability_{tag}.csv")
-            if s == SEEDS[0] and eps in (None, 2.0) and not os.path.exists(sp):
-                step_stability(model, tok, ev).to_csv(sp, index=False)
+            ks = attribution_key(prov, dict(SET, steps=[32, 64, 128], n_posts=40), "step_stability")
+            if s == SEEDS[0] and eps in (None, 2.0) and not cached(sp, ks):
+                write_cached(step_stability(model, tok, ev), sp, ks)
+    # metadata of the explanation run, written after all outputs match the current settings
+    json.dump(dict(meta, settings_key=hashlib.sha256(json.dumps(SET, sort_keys=True).encode()).hexdigest()),
+              open(os.path.join(OUT, "xai_meta.json"), "w"), indent=1)
 
 
 if __name__ == "__main__":
