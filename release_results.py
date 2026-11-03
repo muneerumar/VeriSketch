@@ -6,11 +6,11 @@ client identifiers. It does not establish differential privacy of the release.
 from pathlib import Path
 import argparse,csv,json,math,statistics
 
-GROUPS=('baseline','robust','joint','dp','elsa','fsweep','sketchdim','nullspace')
+GROUPS=('baseline','robust','joint','dpctl','dp','elsa','fsweep','sketchdim','nullspace')
 BLOCKED={'test_pred','post_id','post_ids','tweet_text','tokens','rationale','targets',
          'partition_hist','partition_sizes','malicious','selected','mal_selected',
          'accepted','real_sizes','shadow_size_range','sketch_norms','key_sha256',
-         'source_index','v1_index','param_hash'}
+         'source_index','raw_index','v1_index','param_hash','view','collude_isolation_err_per_client'}
 
 def clean(obj):
     if isinstance(obj,dict):
@@ -44,7 +44,7 @@ def run_summary(o):
 
 def export_run(o,labels=None):
     # Export known fields only; newly introduced private metadata stays local.
-    out={k:clean(o[k]) for k in ['n_aborted','sigma','wall','best_round'] if k in o}
+    out={k:clean(o[k]) for k in ['n_aborted','sigma','wall','best_round','provenance'] if k in o}
     config_fields={'K','T','seed','agg','lr','batch','local_epochs','dropout','d_hidden','clip_update',
         'f_assumed','attack','n_malicious','partition','eval_every','feat','dp_q','dp_lr','dp_clip',
         'select_best_val','rows','width','sigma_mode','sketch_layers','class_weighting','normalisation','eval_test'}
@@ -54,14 +54,15 @@ def export_run(o,labels=None):
     out['test']={k:clean(v) for k,v in o['test'].items() if k in
                  {'accuracy','macro_f1','tmr','far','per_class_f1','confusion','per_class_recall'}}
     history_fields={'round','t_train','t_round','t_client_mask','t_sketch','t_unmask','t_verify',
-        'aborted','verified','in_range','sketch_consistent','val_accuracy','val_macro_f1','val_tmr','val_far',
+        'aborted','abort_kind','verified','in_range','sketch_consistent','val_accuracy','val_macro_f1','val_tmr','val_far',
         'upd_norm_median','upd_norm_max'}
     out['history']=[{k:clean(v) for k,v in t.items() if k in history_fields} for t in o.get('history',[])]
     if o.get('mia'):out['mia']={k:v for k,v in o['mia'].items() if k in {'auc','tpr_at_1fpr'}}
-    out['release_schema']='aggregate-only-v1';out['run_summary']=run_summary(o)
+    out['release_schema']='aggregate-only-v2';out['run_summary']=run_summary(o)
     for original,new in zip(o.get('history',[]),out.get('history',[])):
         ids=original.get('selected',[]);mal=set(o.get('malicious',[]))
         new['accepted_count']=len(ids);new['accepted_malicious_count']=len(set(ids)&mal)
+        if original.get('aborted'):new['abort_reason']=str(original.get('reason','')).split(' for clients')[0]
     pred=o.get('test_pred')
     if pred is not None and labels is not None:
         if len(pred)!=len(labels):raise ValueError('Prediction/label length mismatch')
@@ -89,14 +90,28 @@ def export_results(source,destination,manifest=None):
         if p.exists():
             value=json.loads(p.read_text())
             if folder=='moderation':
-                # The legacy label was misleading: this is a binary harm threshold,
-                # not six-class argmax. Preserve every measured numeric value.
+                # Results written before the operating points were renamed used 'argmax' for the binary
+                # harm-probability threshold; relabel those only (current results carry both rules).
                 for record in value:
-                    for point in record.get('points',[])+record.get('second_source',{}).get('points',[]):
-                        if point.get('rule')=='argmax':point['rule']='harm05'
+                    pts=record.get('points',[])+record.get('second_source',{}).get('points',[])
+                    if not any(p.get('rule')=='harm05' for p in pts):
+                        for point in pts:
+                            if point.get('rule')=='argmax':point['rule']='harm05'
             write(destination/folder/name,value)
     p=source/'near_dup_audit.json'
     if p.exists():write(destination/p.name,json.loads(p.read_text()))
+    p=source/'tune'/'design_check.json'
+    if p.exists():write(destination/'tune'/'design_check.json',json.loads(p.read_text()))
+    # IG step-count stability: medians only (the per-post rows stay local)
+    for p in sorted((source/'xai').glob('ig_step_stability*.csv')):
+        with p.open() as f:rr=list(csv.DictReader(f))
+        med={}
+        for k in (rr[0] if rr else {}):
+            vals=[float(r[k]) for r in rr if r[k] not in ('','nan')]
+            med[k]=statistics.median(vals) if vals else None
+        write(destination/'xai'/(p.stem+'_medians.json'),dict(n_posts=len(rr),medians=med))
+    p=source/'xai'/'xai_meta.json'
+    if p.exists():write(destination/'xai'/'xai_meta.json',json.loads(p.read_text()))
     # Aggregate each attribution model; no post rows or post identifiers leave the private folder.
     rows=[]
     for p in sorted((source/'xai').glob('*_xai.csv')):

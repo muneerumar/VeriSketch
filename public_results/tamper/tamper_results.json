@@ -4,14 +4,14 @@
     "aborted": 0,
     "rate": 0.0,
     "reasons": {},
-    "mean_t_verify": 0.005632806301116944
+    "mean_t_verify": 0.005954341650009155
   },
   "honest (VeriSketch)": {
     "trials": 1000,
     "aborted": 0,
     "rate": 0.0,
     "reasons": {},
-    "mean_t_verify": 0.006537557363510132
+    "mean_t_verify": 0.0063857662677764895
   },
   "AS: +1 unit on one coordinate": {
     "trials": 1000,
@@ -20,7 +20,7 @@
     "reasons": {
       "verification": 1000
     },
-    "mean_t_verify": 0.005588757038116455
+    "mean_t_verify": 0.005902834177017212
   },
   "AS: error 2^60 on one coordinate (high valuation)": {
     "trials": 1000,
@@ -29,7 +29,7 @@
     "reasons": {
       "verification": 1000
     },
-    "mean_t_verify": 0.005492915868759155
+    "mean_t_verify": 0.005839175701141357
   },
   "AS: error P-1 (wrap-around, = -1)": {
     "trials": 1000,
@@ -38,7 +38,7 @@
     "reasons": {
       "verification": 1000
     },
-    "mean_t_verify": 0.0051584625244140625
+    "mean_t_verify": 0.005923049449920654
   },
   "AS: out-of-range value (+2^40)": {
     "trials": 1000,
@@ -47,7 +47,7 @@
     "reasons": {
       "verification": 1000
     },
-    "mean_t_verify": 0.004969493865966797
+    "mean_t_verify": 0.005962295293807983
   },
   "AS: Gaussian perturbation (sd 1e-4)": {
     "trials": 1000,
@@ -56,7 +56,7 @@
     "reasons": {
       "verification": 1000
     },
-    "mean_t_verify": 0.0049234569072723385
+    "mean_t_verify": 0.006219086885452271
   },
   "AS: scale aggregate by 0.5": {
     "trials": 1000,
@@ -65,7 +65,7 @@
     "reasons": {
       "verification": 1000
     },
-    "mean_t_verify": 0.005360755920410156
+    "mean_t_verify": 0.0059848747253417964
   },
   "AS: inject fabricated update": {
     "trials": 1000,
@@ -74,16 +74,34 @@
     "reasons": {
       "verification": 1000
     },
-    "mean_t_verify": 0.0048226981163024905
+    "mean_t_verify": 0.006205747127532959
   },
-  "AS: replay aggregate of another round": {
+  "AS: replay the accepted aggregate of the previous round": {
     "trials": 1000,
     "aborted": 1000,
     "rate": 1.0,
     "reasons": {
       "verification": 1000
     },
-    "mean_t_verify": 0.005264460325241089
+    "mean_t_verify": 0.005917155265808106
+  },
+  "AS: replay the transcript of the previous round": {
+    "trials": 1000,
+    "aborted": 1000,
+    "rate": 1.0,
+    "reasons": {
+      "receipt": 1000
+    },
+    "mean_t_verify": 0.0
+  },
+  "AN: open a coin share of another session": {
+    "trials": 1000,
+    "aborted": 1000,
+    "rate": 1.0,
+    "reasons": {
+      "coin opening": 1000
+    },
+    "mean_t_verify": 0.0
   },
   "AS: drop a client's upload from the transcript": {
     "trials": 1000,
@@ -119,7 +137,7 @@
     "reasons": {
       "verification": 100
     },
-    "mean_t_verify": 0.006585624217987061
+    "mean_t_verify": 0.006340065002441406
   },
   "AN: omit one client's mask": {
     "trials": 1000,
@@ -128,7 +146,7 @@
     "reasons": {
       "verification": 1000
     },
-    "mean_t_verify": 0.005180669069290161
+    "mean_t_verify": 0.005863494873046875
   },
   "AN: random mask sum": {
     "trials": 1000,
@@ -137,7 +155,7 @@
     "reasons": {
       "verification": 1000
     },
-    "mean_t_verify": 0.004992880821228027
+    "mean_t_verify": 0.005834526300430297
   },
   "AN: balanced sketch forgery (+\u03b4 client a, \u2212\u03b4 client b)": {
     "trials": 1000,
@@ -162,7 +180,7 @@
     "aborted": 0,
     "rate": 0.0,
     "reasons": {},
-    "mean_t_verify": 0.005487366914749146
+    "mean_t_verify": 0.006141303300857544
   },
   "AS: out-of-range value (+2^40) with a colluding share": {
     "trials": 1000,
@@ -171,7 +189,7 @@
     "reasons": {
       "range": 1000
     },
-    "mean_t_verify": 0.005325117588043213
+    "mean_t_verify": 0.0062722997665405275
   },
   "AS: naive sketch-kernel error + colluding share (VeriSketch)": {
     "trials": 100,
@@ -180,14 +198,32 @@
     "reasons": {
       "range": 100
     },
-    "mean_t_verify": 0.006543929576873779
+    "mean_t_verify": 0.007136669158935547
   },
-  "AN: second mask-sum query in the same round": {
-    "refused": true
+  "AN and client query enforcement": {
+    "refused": {
+      "second mask-sum query in the same attempt": true,
+      "query under a fabricated round with stored seeds": true,
+      "reuse of an attempt id": true,
+      "retry beyond the attempt limit": true,
+      "stale round": true,
+      "duplicate identities (five copies of client 0)": true,
+      "unknown identity": true,
+      "set below ceil(K/2)": true,
+      "query from another session": true,
+      "second mask-sketch request": true,
+      "client asked twice under the same identifiers": true
+    },
+    "all_refused": true
   },
   "end-to-end abort leaves model unchanged": {
     "round2_aborted": true,
     "params_unchanged": true,
     "round3_updates": true
+  },
+  "SCOPE: cancelling share offsets (+1, -1) of two clients on an honest aggregate": {
+    "trials": 100,
+    "passed": 100,
+    "aggregate_unchanged": 100
   }
 }

@@ -52,7 +52,7 @@ def main():
     ups = [fl.local_train(head, Xtr[p], ytr[p], c, g) for p in parts]
     ups = [u * min(1.0, c["clip_update"] / float(u.norm())) for u in ups]
     n = [float(len(p)) for p in parts]; dim = ups[0].numel()
-    rs = np.random.default_rng(1); state = {}
+    rs = np.random.default_rng(1); state = {}; g2 = torch.Generator().manual_seed(7)
 
     def one(v):  e = np.zeros(dim, np.uint64); e[int(rs.integers(dim))] = np.uint64(v); return e
     S = {
@@ -65,7 +65,9 @@ def main():
         "AS: Gaussian perturbation (sd 1e-4)": dict(party="AS", fn=lambda U, AS, A: sa.fadd(U, sa.encode(rs.normal(0, 1e-4, dim), 1.0))),
         "AS: scale aggregate by 0.5": dict(party="AS", fn=lambda U, AS, A: np.mod(np.rint(sa.decode(U) * 0.5 * sa.SCALE).astype(np.int64), P).astype(np.uint64)),
         "AS: inject fabricated update": dict(party="AS", fn=lambda U, AS, A: sa.fadd(U, sa.encode(rs.normal(0, 0.01, dim), 1.0))),
-        "AS: replay aggregate of another round": dict(party="AS", fn=lambda U, AS, A: state.get("prev", U) if state.get("prev") is not None and not (state["prev"] == U).all() else sa.fadd(U, one(7))),
+        "AS: replay the accepted aggregate of the previous round": dict(replay="aggregate"),
+        "AS: replay the transcript of the previous round": dict(replay="transcript"),
+        "AN: open a coin share of another session": dict(party="AN_coin_other", mode="verisketch"),
         "AS: drop a client's upload from the transcript": dict(party="AS_transcript", fn=lambda tr: tr[1:]),
         "AS: misreport one client's public weight in the transcript": dict(party="AS_transcript",
                                                                            fn=lambda tr: [(cc, (w * 0.5 if cc == 3 else w), h) for cc, w, h in tr]),
@@ -88,6 +90,30 @@ def main():
         for t in range(ntr):
             tam = None
             if "fn" in spec: tam = dict(party=spec["party"], fn=spec["fn"])
+            if spec.get("replay"):
+                # an honest round with fresh updates first; its accepted aggregate / transcript is then replayed
+                # in the next round of the same session, whose clients send new updates
+                rr = 2 * t + 1; rec = {}
+                ups_a = [u + 0.01 * torch.randn(u.shape, generator=g2) for u in ups]
+                ups_a = [u * min(1.0, c["clip_update"] / float(u.norm())) for u in ups_a]
+                o_unmask = sa.AggServer.unmask
+                def rec_unmask(self2, A, M, _o=o_unmask):
+                    U = _o(self2, A, M); rec["U"] = U; return U
+                sa.AggServer.unmask = rec_unmask
+                o_tr = sa.AggServer.transcript
+                def rec_tr(self2, w, _o=o_tr):
+                    tr = _o(self2, w); rec.setdefault("tr", tr); return tr
+                sa.AggServer.transcript = rec_tr
+                try: a0, s0 = sec.run(ups_a, n, rr, mode, 3, c["clip_update"])
+                finally: sa.AggServer.unmask = o_unmask; sa.AggServer.transcript = o_tr
+                assert a0 is not None
+                ups_b = [u + 0.01 * torch.randn(u.shape, generator=g2) for u in ups]
+                ups_b = [u * min(1.0, c["clip_update"] / float(u.norm())) for u in ups_b]
+                if spec["replay"] == "aggregate": tam = dict(party="AS", fn=lambda U, AS, A, R=rec: R["U"])
+                else: tam = dict(party="AS_transcript", fn=lambda tr, R=rec: R["tr"])
+                agg, st = sec.run(ups_b, n, rr + 1, mode, 3, c["clip_update"], tamper=tam)
+                if agg is None: flagged += 1; reasons[st["reason"]] = reasons.get(st["reason"], 0) + 1
+                tv.append(st.get("t_verify", 0)); continue
             if spec.get("kernel"):
                 def kfn(U, AS, A, sec=sec):
                     return sa.fadd(U, state["kernel"])
@@ -109,9 +135,13 @@ def main():
                     def __init__(s2, *a, **k):
                         super().__init__(*a, **k); state["kernel"] = null_vector_mod_p(s2, seed=t)
                 sa.CountSketch = Hook
-            if spec.get("party") == "AN_coin":
+            if spec.get("party") in ("AN_coin", "AN_coin_other"):
                 orig_rev = sa.AuxNode.reveal_coin
-                sa.AuxNode.reveal_coin = lambda self2, i: os.urandom(32)
+                if spec["party"] == "AN_coin":
+                    sa.AuxNode.reveal_coin = lambda self2, i: os.urandom(32)
+                else:   # a valid opening, but of the coin committed in another session
+                    other = sa.AuxNode(os.urandom(16), range(c["K"]), 5); other.open_attempt(1, 0, 4)
+                    sa.AuxNode.reveal_coin = lambda self2, i, o=other, f=orig_rev: f(o, i)
                 tam = None
             if spec.get("collude"):
                 # true aggregate of the accepted set is needed by the colluding client
@@ -124,22 +154,40 @@ def main():
             finally:
                 if spec.get("kernel"): sa.CountSketch = orig_cs
                 if spec.get("collude"): sa.AggServer.unmask = orig_unmask
-                if spec.get("party") == "AN_coin": sa.AuxNode.reveal_coin = orig_rev
+                if spec.get("party") in ("AN_coin", "AN_coin_other"): sa.AuxNode.reveal_coin = orig_rev
             if agg is None: flagged += 1; reasons[st["reason"]] = reasons.get(st["reason"], 0) + 1
             tv.append(st.get("t_verify", 0))
             if agg is not None and state.get("prev") is None and "honest" in name: pass
-        if name == "honest (SecAgg)":
-            # keep an honest aggregate of a previous round for the replay scenario
-            sec2 = fl.SecureRound(c["K"]); AS = sa.AggServer()
-            state["prev"] = sa.encode(np.random.default_rng(5).normal(0, 0.01, dim), 1.0)
         res[name] = dict(trials=ntr, aborted=flagged, rate=flagged / ntr, reasons=reasons, mean_t_verify=float(np.mean(tv)))
         print(name, res[name], flush=True)
-    # repeated mask-sum query is refused
-    AN = sa.AuxNode(min_release=2); AN.receive_seed(0, os.urandom(32), 1, 10); AN.receive_seed(1, os.urandom(32), 1, 10)
-    AN.mask_sum(1, [0, 1])
-    try: AN.mask_sum(1, [0]); refused = False
-    except PermissionError: refused = True
-    res["AN: second mask-sum query in the same round"] = dict(refused=refused)
+    # malformed release queries to the AN (each must be refused)
+    def refused(f, *a):
+        try: f(*a); return False
+        except PermissionError: return True
+    sid = os.urandom(16)
+    def fresh():
+        AN = sa.AuxNode(sid, range(10), 5); AN.open_attempt(1, 0, 16)
+        for k in range(10): AN.receive_seed(sid, 1, 0, k, os.urandom(32))
+        return AN
+    q = {}
+    AN = fresh(); AN.mask_sum(sid, 1, 0, list(range(10)))
+    q["second mask-sum query in the same attempt"] = refused(AN.mask_sum, sid, 1, 0, list(range(9)))
+    q["query under a fabricated round with stored seeds"] = refused(AN.mask_sum, sid, 2, 0, list(range(9)))
+    q["reuse of an attempt id"] = refused(AN.open_attempt, 1, 0, 16)
+    q["retry beyond the attempt limit"] = refused(AN.open_attempt, 1, 1, 16)
+    AN.open_attempt(3, 0, 16)
+    q["stale round"] = refused(AN.open_attempt, 2, 0, 16)
+    AN = fresh()
+    q["duplicate identities (five copies of client 0)"] = refused(AN.mask_sum, sid, 1, 0, [0] * 5)
+    q["unknown identity"] = refused(AN.mask_sum, sid, 1, 0, [0, 1, 2, 3, 77])
+    q["set below ceil(K/2)"] = refused(AN.mask_sum, sid, 1, 0, [0, 1, 2, 3])
+    q["query from another session"] = refused(AN.mask_sum, os.urandom(16), 1, 0, list(range(5)))
+    AN.mask_sketches(sid, 1, 0, b"D", os.urandom(32), 4, 16)
+    q["second mask-sketch request"] = refused(AN.mask_sketches, sid, 1, 0, b"D", os.urandom(32), 4, 16)
+    cl = sec.clients[0]; cl.answered = set(); V = sa.prg_field(os.urandom(32), dim)
+    cl.ip_share(V, list(range(10)), sec.sid, 999, 0, 0)
+    q["client asked twice under the same identifiers"] = refused(cl.ip_share, V, list(range(10)), sec.sid, 999, 0, 0)
+    res["AN and client query enforcement"] = dict(refused=q, all_refused=all(q.values()))
     # end-to-end: an aborted round leaves the global model unchanged
     c2 = dict(c, agg="verisketch", T=3, eval_every=3, _record_params=True,
               _tamper=dict(round=2, spec=dict(party="AS", fn=lambda U, AS, A: sa.fadd(U, one(1)))))
@@ -149,7 +197,22 @@ def main():
     res["end-to-end abort leaves model unchanged"] = dict(round2_aborted=bool(h[1].get("aborted")),
                                                           params_unchanged=h[0]["param_hash"] == h[1]["param_hash"],
                                                           round3_updates=h[1]["param_hash"] != h[2]["param_hash"])
-    print(res["end-to-end abort leaves model unchanged"], res["AN: second mask-sum query in the same round"])
+    # scope of the share check: two accepted clients add +1 and -1 to their shares on an honest aggregate
+    orig_v = sa.verify_aggregate; passed = 0; same = 0
+    def vcancel(U, V, shares):
+        shares = list(shares); shares[0] = (shares[0] + 1) % P; shares[1] = (shares[1] - 1) % P
+        return orig_v(U, V, shares)
+    sa.verify_aggregate = vcancel
+    try:
+        sec = fl.SecureRound(c["K"]); ref = fl.SecureRound(c["K"])
+        for t in range(100):
+            a1, _ = sec.run(ups, n, t + 1, "secagg", 3, c["clip_update"]); a0, _ = ref.run(ups, n, t + 1, "secagg", 3, c["clip_update"])
+            passed += a1 is not None; same += bool(a1 is not None and torch.equal(a0, a1))
+    finally:
+        sa.verify_aggregate = orig_v
+    res["SCOPE: cancelling share offsets (+1, -1) of two clients on an honest aggregate"] = dict(trials=100, passed=passed, aggregate_unchanged=same)
+    print(res["end-to-end abort leaves model unchanged"], res["AN and client query enforcement"],
+          res["SCOPE: cancelling share offsets (+1, -1) of two clients on an honest aggregate"])
     save_json(res, os.path.join(RES, "tamper", "tamper_results.json"))
 
 

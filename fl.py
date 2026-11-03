@@ -76,8 +76,30 @@ class Adam:
             p.sub_(self.lr * mh / (vh.sqrt() + self.eps))
 
 
-def local_train(head, X, y, cfg, g, dp=None):
-    """Returns the local update Delta = w_local - w_global (flat float tensor)."""
+class OSRandom:
+    """Poisson sampling and Gaussian noise drawn from the operating-system CSPRNG (os.urandom).
+    Uniforms use 53 random bits; normals use the Box-Muller transform in float64.  This removes the
+    ordinary-PRNG state from the DP mechanism.  It does not address floating-point attacks on Gaussian
+    sampling (Mironov, 2012); a deployment would use a discrete Gaussian sampler instead."""
+    @staticmethod
+    def uniform(n):
+        b = np.frombuffer(os.urandom(8 * n), dtype=np.uint64) >> np.uint64(11)
+        return (b.astype(np.float64) + 0.5) * (2.0 ** -53)
+
+    def poisson_mask(self, n, q):
+        return torch.from_numpy(self.uniform(n) < q)
+
+    def normal(self, shape):
+        n = int(np.prod(shape)); m = (n + 1) // 2
+        u1, u2 = self.uniform(m), self.uniform(m); r = np.sqrt(-2.0 * np.log(u1))
+        z = np.concatenate([r * np.cos(2 * np.pi * u2), r * np.sin(2 * np.pi * u2)])[:n]
+        return torch.from_numpy(z.reshape(shape)).to(DT)
+
+
+def local_train(head, X, y, cfg, g, dp=None, noise_rng=None):
+    """Returns the local update Delta = w_local - w_global (flat float tensor).
+    With DP, Poisson sampling and noise come from noise_rng (default OSRandom); g drives dropout only.
+    The sum of clipped gradients is divided by the expected batch q*n, with n the client's public capacity."""
     w0 = head.flat().clone()
     P = [p.clone() for p in head.params()]
     opt = Adam(P, cfg["lr"])
@@ -93,17 +115,21 @@ def local_train(head, X, y, cfg, g, dp=None):
                 opt.step(P, [x / len(idx) for x in gr])
     else:
         q, sigma, C = dp["q"], dp["sigma"], dp["clip"]
+        rs = noise_rng or OSRandom()
         steps = int(round(cfg["local_epochs"] / q))
         exp_b = q * n
         for _ in range(steps):
-            idx = torch.nonzero(torch.rand(n, generator=g) < q).squeeze(1)   # Poisson sampling
+            idx = torch.nonzero(rs.poisson_mask(n, q)).squeeze(1)              # Poisson sampling
             if len(idx) > 0:
                 Xb, hb, d1, d2, nrm, _ = per_example_grads(P, X[idx], y[idx], cw, cfg["dropout"], g)
                 c = torch.clamp(C / (nrm + 1e-12), max=1.0)
                 gr = sum_grads(Xb, hb, d1, d2, c)
             else:
                 gr = [torch.zeros_like(p) for p in P]
-            gr = [x + torch.randn(x.shape, generator=g) * sigma * C for x in gr]
+            if sigma > 0:
+                z = rs.normal((sum(x.numel() for x in gr),)) * (sigma * C); o = 0; noisy = []
+                for x in gr: noisy.append(x + z[o:o + x.numel()].reshape(x.shape)); o += x.numel()
+                gr = noisy
             opt.step(P, [x / exp_b for x in gr])
     tmp = Head.__new__(Head); tmp.shapes = head.shapes; tmp.W1, tmp.b1, tmp.W2, tmp.b2 = P
     return tmp.flat() - w0
@@ -204,38 +230,51 @@ def adaptive_select(norms, D, f, clip_u, norm_tau=1.5, mad_c=3.0, fixed=False):
 
 
 class SecureRound:
-    """One round of masked aggregation over F_P (SecAgg-FedAvg, VeriSketch or VeriSketch-MK)
-    with real cryptography. Returns (aggregate or None if the round aborts, statistics)."""
-    def __init__(self, K, rows=4, width=64, sid=None):
+    """One session of masked aggregation over F_P (SecAgg-FedAvg, VeriSketch or VeriSketch-MK) with real
+    cryptography.  The AN object and its release state persist for the whole session.  run() executes one
+    attempt of one round and returns (aggregate or None if the round aborts, statistics).  The default
+    max_attempts=1 means an aborted round is not retried: the model stays unchanged and the next round
+    starts from new local updates."""
+    PROTOCOL_ABORTS = ("receipt", "coin opening", "sketch self-check", "verification", "range", "sketch consistency")
+
+    def __init__(self, K, rows=4, width=64, sid=None, state_path=None, max_attempts=1):
         self.K, self.rows, self.width = K, rows, width
         self.sid = sid or os.urandom(16)
         self.clients = [sa.Client(i) for i in range(K)]
         pks = {c.cid: c.pk for c in self.clients}
         for c in self.clients: c.setup_pairwise(pks)
+        self.min_release = (K + 1) // 2                                    # ceil(K/2)
+        self.AN = sa.AuxNode(self.sid, range(K), self.min_release, state_path, max_attempts)
+
+    @staticmethod
+    def int_bounds(w, clip_u):
+        """Public per-client integer bounds B_k = ceil(w_k C_u' 2^24), C_u' = C_u (1 + 1e-6)."""
+        return [sa.int_bound(float(np.float64(wi) * np.float64(clip_u * (1 + 1e-6)))) for wi in w]
 
     def run(self, ups, n, rnd, mode, f, clip_u, mad_c=3.0, norm_tau=1.5, tamper=None,
-            sigma_mode="post_commit", sub=None, malicious=(), collude_share=None, kappa=1):
+            sigma_mode="post_commit", sub=None, malicious=(), collude_share=None, kappa=1, att=0, capture=False):
         K, d = self.K, ups[0].numel(); sid = self.sid; tam = tamper or {}
-        AS, AN = sa.AggServer(), sa.AuxNode(min_release=max(2, K // 2))
+        AS, AN = sa.AggServer(), self.AN
         nmax = float(max(n)); w = [float(x) / nmax for x in n]          # public weights in (0, 1]
-        st = dict(t_client_mask=0.0, t_sketch=0.0, t_unmask=0.0, t_verify=0.0, aborted=False, reason="")
-        def abort(reason):
-            st.update(aborted=True, reason=reason, accepted=[]); return None, st
+        B = self.int_bounds(w, clip_u)
+        st = dict(t_client_mask=0.0, t_sketch=0.0, t_unmask=0.0, t_verify=0.0, aborted=False, reason="", abort_kind="")
+        def abort(reason, kind="protocol check"):
+            st.update(aborted=True, reason=reason, abort_kind=kind, accepted=[]); return None, st
+        h1, h2 = AN.open_attempt(rnd, att, d)                              # AN coin commitments (attempt start)
         t = time.time()
-        for c, u, wi in zip(self.clients, ups, w):
-            v = (wi * u).numpy().astype(np.float64)
+        for c, u, wi, Bi in zip(self.clients, ups, w, B):
+            v = np.float64(wi) * u.detach().double().numpy()             # weighting in float64
             if c.cid in malicious:      # Byzantine clients may send any field element (no range proof)
-                enc = np.mod(np.rint(v * sa.SCALE).astype(np.int64), sa.P).astype(np.uint64)
+                enc = np.mod(np.rint(np.nan_to_num(v) * sa.SCALE).astype(np.int64), sa.P).astype(np.uint64)
             else:
-                enc = sa.encode(v, clip_u * (1 + 1e-6))
-            x, seed = c.mask_update(enc, sid, rnd)
-            AS.receive(c.cid, x); AN.receive_seed(c.cid, seed, rnd, d)
+                enc = sa.encode(v, Bi / sa.SCALE)
+            x, seed = c.mask_update(enc, sid, rnd, att)
+            AS.receive(c.cid, x); AN.receive_seed(sid, rnd, att, c.cid, seed)
         st["t_client_mask"] = time.time() - t
-        h1, h2 = AN.commit_coins(rnd)                                      # AN coin commitments (round start)
         tr = AS.transcript(dict(enumerate(w)))
         if tam.get("party") == "AS_transcript": tr = tam["fn"](tr)
-        D0 = sa.digest(sid, rnd, tr)
-        if not all(c.check_receipt(D0, tr, w[c.cid], sid, rnd) for c in self.clients): return abort("receipt")
+        D0 = sa.digest(sid, rnd, tr, att)
+        if not all(c.check_receipt(D0, tr, w[c.cid], sid, rnd, att) for c in self.clients): return abort("receipt")
         D = sa.H(D0, h1, h2)
         A = list(range(K)); S = None; cs = None
         if mode in ("verisketch", "verisketch_mk"):
@@ -243,9 +282,12 @@ class SecureRound:
             # two-party coin: the AS contributes a fresh share with D, then the AN opens its committed share
             r_as, r_an = os.urandom(32), AN.reveal_coin(0)
             if not sa.check_coin(h1, b"coin1", r_an): return abort("coin opening")
-            sigma = sa.sketch_seed(sid, rnd, D, r_an + r_as) if sigma_mode == "post_commit" else predictable_sigma(rnd)
+            sigma = sa.sketch_seed(sid, rnd, D, r_an + r_as, att) if sigma_mode == "post_commit" else predictable_sigma(rnd)
             cs = sa.CountSketch(sigma, sub or d, self.rows, self.width)
-            MS = AN.mask_sketches(cs, range(K), sub)
+            if sigma_mode == "post_commit":
+                MS = AN.mask_sketches(sid, rnd, att, D, r_as, self.rows, self.width, sub)
+            else:                                                          # ablation: AN sketches under the public seed
+                MS = {cc: cs(AN._mask(cc)[:sub] if sub else AN._mask(cc)) for cc in range(K)}
             if tam.get("party") == "AN_sketch": MS = tam["fn"](MS)
             S = AS.sketch_updates(cs, MS, sub)
             # every client checks the sketch the AS publishes for it
@@ -259,26 +301,28 @@ class SecureRound:
             A = adaptive_select(norms, Dm, f, clip_u, norm_tau, mad_c, fixed=(mode == "verisketch_mk"))
             st["t_sketch"] = time.time() - t
             st.update(sketch_norms=norms.tolist())
-            if len(A) < AN.min_release: return abort("accepted set below release threshold")
+            if capture:                                                    # the AS's actual view (leakage study)
+                st["view"] = dict(sketch=np.stack([cs.to_float(S[i]).reshape(-1) for i in range(K)]), weights=list(w))
+            if len(A) < self.min_release: return abort("accepted set below release threshold", "filter")
         t = time.time()
-        M = AN.mask_sum(rnd, A)
+        if tam.get("party") == "AN_query": tam["fn"](AN, sid, rnd, att, A)    # malformed-query probes
+        M = AN.mask_sum(sid, rnd, att, A)
         if tam.get("party") == "AN": M = tam["fn"](M, AN, A)
         U = AS.unmask(A, M)
         if tam.get("party") == "AS": U = tam["fn"](U, AS, A)
         st["t_unmask"] = time.time() - t
         t = time.time()
-        c = sa.aggregate_commitment(sid, rnd, A, U)                     # AS commits and adds its coin share ...
+        c = sa.aggregate_commitment(sid, rnd, A, U, att)                # AS commits and adds its coin share ...
         r_as, r_an = os.urandom(32), AN.reveal_coin(1)                  # ... then the AN opens its committed share
         if not sa.check_coin(h2, b"coin2", r_an): return abort("coin opening")
         ok_v = True
         for idx in range(kappa):                                        # kappa independent challenges
-            V = sa.verification_vector(sid, rnd, c, r_an + r_as, d, idx)
-            shares = [self.clients[i].ip_share(V, A, sid, rnd, idx) for i in A]
+            V = sa.verification_vector(sid, rnd, c, r_an + r_as, d, idx, att)
+            shares = [self.clients[i].ip_share(V, A, sid, rnd, idx, att) for i in A]
             if collude_share is not None:                                # limitation test: colluding client offsets
                 shares[0] = (shares[0] + collude_share(U, V)) % sa.P
             ok_v = ok_v and sa.verify_aggregate(U, V, shares)
-        bound = sum(w[i] for i in A) * clip_u
-        ok_r = sa.in_range(U, bound)
+        ok_r = sa.in_range_int(U, sum(B[i] for i in A))                  # exact integer bound of the accepted set
         ok_s = True
         if S is not None:
             tot = None
@@ -289,7 +333,8 @@ class SecureRound:
                   upload_bytes_per_client=d * 8 + 32, sketch_scalars=(self.rows * self.width if S is not None else 0))
         if not (ok_v and ok_r and ok_s):
             return abort("verification" if not ok_v else ("range" if not ok_r else "sketch consistency"))
-        agg = torch.tensor(sa.decode(U), dtype=DT) * nmax / float(sum(n[i] for i in A))
+        agg = torch.tensor(sa.decode(U) * nmax / float(sum(n[i] for i in A)), dtype=DT)
+        if capture: st.setdefault("view", {}).update(accepted=list(A), weights=list(w), U=sa.decode(U))
         return agg, st
 
 
@@ -344,12 +389,15 @@ def run_fl(cfg, Xtr, ytr, Xva, yva, Xte, yte, log=print):
     if cfg.get("dp"):
         from opacus.accountants.utils import get_noise_multiplier
         q = cfg["dp"]["q"]
-        sigma = get_noise_multiplier(target_epsilon=cfg["dp"]["epsilon"], target_delta=cfg["dp"]["delta"],
-                                     sample_rate=q, steps=int(round(cfg["local_epochs"] / q)) * cfg["T"], accountant="rdp")
+        if cfg["dp"].get("epsilon") is None:          # noise-free control: same sampling and clipping, sigma = 0
+            sigma = 0.0
+        else:
+            sigma = get_noise_multiplier(target_epsilon=cfg["dp"]["epsilon"], target_delta=cfg["dp"]["delta"],
+                                         sample_rate=q, steps=int(round(cfg["local_epochs"] / q)) * cfg["T"], accountant="rdp")
         dp = dict(q=q, sigma=sigma, clip=cfg["dp"]["clip"])
     sec = SecureRound(K, rows=cfg.get("rows", 4), width=cfg.get("width", 64)) if cfg["agg"] in ("secagg", "verisketch", "verisketch_mk") else None
-    # DP: each client draws sampling, dropout and noise from its own generator seeded from the OS CSPRNG
-    # (not recorded), so the server cannot reproduce the noise; such runs are not bit-reproducible.
+    # DP: Poisson sampling and noise come from the OS CSPRNG (OSRandom); dropout uses a per-client generator
+    # seeded from the OS (not recorded).  Such runs are not bit-reproducible.
     import secrets
     cgen = [torch.Generator().manual_seed(secrets.randbits(62)) for _ in range(K)] if dp else None
     n_aborted = 0
@@ -405,7 +453,7 @@ def run_fl(cfg, Xtr, ytr, Xva, yva, Xte, yte, log=print):
         rec = dict(round=r, t_train=t_train, t_round=time.time() - t0, selected=sel,
                    upd_norm_median=float(np.median(hn)), upd_norm_max=float(np.max(hn)),
                    mal_selected=[i for i in sel if i in mal])
-        rec.update({k: v for k, v in st.items() if k.startswith("t_") or k in ("verified", "sketch_consistent", "in_range", "aborted", "reason")})
+        rec.update({k: v for k, v in st.items() if k.startswith("t_") or k in ("verified", "sketch_consistent", "in_range", "aborted", "reason", "abort_kind")})
         if r % cfg.get("eval_every", 1) == 0 or r == cfg["T"]:
             mv, _, _ = evaluate(head, Xva, yva, C); rec.update({"val_" + k: v for k, v in mv.items() if k != "per_class_f1"})
         if cfg.get("select_best_val") and rec.get("val_macro_f1", -1) > best[0]:

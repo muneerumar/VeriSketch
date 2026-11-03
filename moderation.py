@@ -1,7 +1,8 @@
 """Moderation operating points.
 
-Harm score = 1 - p(not cyberbullying).  Thresholds are chosen on the validation split
-(harm probability >0.5, FAR 10% and maximum harmful-F1) and applied to the test split.  Reports recall and
+Harm score = 1 - p(not cyberbullying).  Operating points: "argmax" flags a post when the most
+probable of the six classes is harmful (true multiclass argmax); "harm05" flags it when the harm
+score exceeds 0.5; "far10" and "maxf1" use thresholds chosen on the validation split.  Reports recall and
 FAR, precision at realistic prevalence (re-weighting the measured recall and FAR), moderator
 workload, ROC-AUC/AP, calibration, per-class recall and a second corpus (HateXplain)."""
 import os, json, numpy as np, pandas as pd, torch
@@ -19,14 +20,17 @@ def ece(p, y, bins=15):
     return float(out)
 
 
-def op_point(s_val, y_val, s_te, y_te, rule):
-    if rule == "far10":
+def op_point(s_val, y_val, s_te, y_te, rule, argmax_te=None):
+    if rule == "argmax":
+        tau = float("nan"); ph = argmax_te != 0
+    elif rule == "far10":
         neg = np.sort(s_val[y_val == 0]); tau = neg[int(np.ceil(0.9 * len(neg))) - 1]
     elif rule == "maxf1":
         pr, rc, th = precision_recall_curve(y_val, s_val); f = 2 * pr * rc / (pr + rc + 1e-12); tau = th[np.argmax(f[:-1])]
     else:
         tau = 0.5
-    ph = s_te > tau; tpr = (ph & (y_te == 1)).sum() / (y_te == 1).sum(); far = (ph & (y_te == 0)).sum() / (y_te == 0).sum()
+    if rule != "argmax": ph = s_te > tau
+    tpr = (ph & (y_te == 1)).sum() / (y_te == 1).sum(); far = (ph & (y_te == 0)).sum() / (y_te == 0).sum()
     r = dict(rule=rule, tau=float(tau), tpr=float(tpr), far=float(far))
     for pi in (0.05, 0.10, 0.20):
         r[f"precision@{pi}"] = float(pi * tpr / (pi * tpr + (1 - pi) * far + 1e-12)); r[f"flagged@{pi}"] = float(pi * tpr + (1 - pi) * far)
@@ -37,7 +41,8 @@ def main():
     cfgb = json.load(open(CONFIG_FILE))
     d = load_kaggle("cls"); out = []
     # second source: HateXplain test posts (Gab/Twitter, different annotation scheme), mapped to
-    # harmful = offensive or hate speech.  Features use the same public normaliser as the Kaggle model.
+    # harmful = offensive or hate speech.  Features use the Kaggle model's normaliser, which is computed
+    # from HateXplain TRAINING features only, so no HateXplain test feature enters preprocessing.
     hx = pd.read_json(os.path.join(ROOT, "data", "hatexplain_clean.jsonl"), lines=True)
     mu, sd = public_stats("hx", "cls")
     Xhx = torch.tensor(((np.load(os.path.join(ROOT, "features", "hx_cls.npy")) - mu) / sd)[hx.split.values == "test"], dtype=torch.float32)
@@ -55,12 +60,12 @@ def main():
                 rec = dict(seed=s, agg=agg, eps=eps, roc_auc=float(roc_auc_score(yt, st)), ap=float(average_precision_score(yt, st)),
                            ece_harm=ece(st, yt), ece_top=ece(prob.max(1), (prob.argmax(1) == d["test"][1].numpy()).astype(float)),
                            confusion=confusion_matrix(d["test"][1].numpy(), prob.argmax(1), labels=list(range(6))).tolist(),
-                           points=[op_point(sv, yv, st, yt, r) for r in ("harm05", "far10", "maxf1")])
+                           points=[op_point(sv, yv, st, yt, r, prob.argmax(1)) for r in ("argmax", "harm05", "far10", "maxf1")])
                 with torch.no_grad():
-                    shx = 1 - torch.softmax(head.logits(Xhx), 1).numpy()[:, 0]
+                    phx = torch.softmax(head.logits(Xhx), 1).numpy(); shx = 1 - phx[:, 0]
                 rec["second_source"] = dict(corpus="HateXplain test", n=int(len(yhx)), prevalence=float(yhx.mean()),
                                             roc_auc=float(roc_auc_score(yhx, shx)), ap=float(average_precision_score(yhx, shx)),
-                                            points=[op_point(sv, yv, shx, yhx, r) for r in ("harm05", "far10", "maxf1")])
+                                            points=[op_point(sv, yv, shx, yhx, r, phx.argmax(1)) for r in ("argmax", "harm05", "far10", "maxf1")])
                 cm = np.array(rec["confusion"]); rec["per_class_recall"] = (cm.diagonal() / cm.sum(1)).tolist()
                 pr_, rc_, _ = precision_recall_curve(yt, st); k = max(1, len(pr_) // 200)
                 rec["pr"] = [pr_[::k].tolist(), rc_[::k].tolist()]

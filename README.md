@@ -1,75 +1,87 @@
-# VeriSketch research software
+# VeriSketch
 
-Research code for federated text classification, masked aggregation, sketch-space filtering,
-DP-SGD experiments and aggregate evaluation. This snapshot contains code and aggregate
-results. It does not include the unpublished manuscript, manuscript-generation sources,
-review correspondence, experiment logs, individual predictions or trained models.
+Research code for VeriSketch, a two-server secure aggregation protocol in which the aggregation
+server filters clients on owner-checked count sketches of their updates and learns only one
+aggregate per round. The code covers the protocol over the prime field F_P (P = 2^61 - 1),
+federated training of a classification head on frozen DistilBERT features, DP-SGD, Byzantine
+attacks, plaintext robust baselines, and the evaluation studies (leakage, integrity, cost,
+moderation operating points, explanations).
 
-The code is a research prototype. Included measurements are an experimental snapshot;
-their presence does not certify deployment security or differential privacy.
+This repository holds the code and the aggregate results of every run. It does not hold the
+manuscript, raw texts, row-level split manifests, per-example predictions, client partitions
+or model weights. The split and every run can be regenerated from the original datasets.
+
+The code is a research prototype. All parties run in one process without a network. The
+results do not certify the security of a deployment.
 
 ## Contents
 
-- `secagg.py`, `fl.py`: protocol primitives, models, training and aggregation.
-- `data_prep.py`, `features.py`: local data preparation and feature extraction.
-- `exp.py` and the evaluation scripts: experiment execution on locally supplied inputs.
-- `config/defaults.json`: non-secret example training configuration.
-- `public_results/`: aggregate run metrics, confusion matrices and aggregate evaluation results.
-- `analyze.py`: validate confusion-matrix metrics and summarize released runs using Python's standard library.
-- `release_results.py`, `release_check.py`: explicit aggregate export and content checks.
+| Path | Purpose |
+|---|---|
+| `secagg.py` | field arithmetic, encoding with integer bounds, ChaCha20 PRG with rejection sampling, CountSketch, clients, auxiliary node with release state, aggregation server |
+| `fl.py` | head model, DP-SGD (CSPRNG sampling and noise), attacks, plaintext aggregators, `SecureRound` (one protocol attempt), training driver |
+| `data_prep.py` | corpus preparation, label-conflict removal, split, manifest regeneration and hash check |
+| `features.py` | frozen-encoder feature extraction (weights checked by SHA-256) |
+| `exp.py` | experiment grids; every result stores input and code hashes; failed or stale runs give a non-zero exit status |
+| `tune.py`, `moderation.py`, `sketch_fidelity.py`, `leak.py`, `xai.py`, `tamper.py`, `bench.py`, `near_dup_audit.py` | side studies |
+| `test_secagg.py`, `test_protocol.py`, `test_dp.py`, `smoke_test.py` | unit, negative and boundary tests |
+| `analyze_local.py` | full analysis of locally regenerated results |
+| `analyze.py` | summary of the published aggregate results (standard library only) |
+| `release_results.py`, `release_check.py` | aggregate-only export and content check |
+| `config/defaults.json` | training configuration |
+| `public_results/` | aggregate results of every run |
+| `MANIFEST_SHA256.txt`, `PROVENANCE.json` | hash of the split manifest; hashes of the datasets and encoder files |
+| `requirements.txt`, `requirements-lock.txt` | direct dependencies; complete lock of the stack used for the reported runs |
 
-## Inspect aggregate results
+## Inspect the aggregate results
 
-No training dependencies or datasets are needed for these commands:
+No datasets or training libraries are needed:
 
 ```bash
 python release_check.py
-python analyze.py --input public_results --output results/aggregate_summary.csv
+python analyze.py --input public_results --output summary/aggregate_summary.csv
 ```
 
-In moderation results, `harm05` denotes harm probability above 0.5; it is not multiclass argmax.
-The summaries preserve aggregate measurements; they do not contain record-level predictions,
-post identifiers, client class distributions or per-client inference errors. Post-level paired
-attribution tests cannot be independently reconstructed from aggregate summaries alone.
+`analyze.py` recomputes accuracy, macro-F1, TMR and FAR of every run from its confusion matrix
+and checks them against the stored values.
 
-## Run experiments locally
+## Regenerate the experiments
 
-Use Python 3.13 and install `requirements.txt` in a virtual environment. Supply these inputs
-under their original licenses and terms; they are not redistributed here:
+Python 3.13, CPU only. Install `requirements-lock.txt` in a virtual environment. Obtain the
+inputs under their original terms and place them as follows:
 
-- `data/cyberbullying_tweets.csv`: Kaggle Cyberbullying Classification.
-- `data/dataset.json`, `data/post_id_divisions.json`: HateXplain and its official split.
-- `model/`: the DistilBERT-base-uncased weights, config and tokenizer files expected by `features.py`.
+- `data/cyberbullying_tweets.csv`: Kaggle, Cyberbullying Classification;
+- `data/dataset.json` and `data/post_id_divisions.json`: HateXplain (github.com/hate-alert/HateXplain, `Data/`);
+- `model/`: `config.json`, `model.safetensors`, `tokenizer_config.json` and `vocab.txt` of `distilbert-base-uncased`.
+
+`PROVENANCE.json` lists the SHA-256 hash of every input file.
 
 ```bash
-python data_prep.py
+python data_prep.py      # rebuilds the split; exits with an error if the manifest hash differs
 python features.py
-python test_secagg.py
-python test_dp.py
+python test_secagg.py && python test_protocol.py && python test_dp.py
 python smoke_test.py
-python exp.py baseline
+./run_all.sh             # all grids and side studies (about 15 hours on 2 CPU cores)
+python analyze_local.py
 ```
 
-Other experiment groups are `robust`, `joint`, `dp`, `nullspace`, `sketchdim`, `fsweep` and `elsa`.
-The `elsa` group emulates norm-bound filtering; it is not an implementation of ELSA cryptography.
-Training and evaluations write into local `results/`; input data, features, models and all
-new experiment outputs are excluded by `.gitignore`. Secure masks and experimental DP
-random streams prevent exact bit-for-bit repetition of all runs.
+Masks, coins and DP noise come from the operating system's random source, so secure and DP runs
+are not bit-for-bit repeatable. Plaintext runs without DP are.
 
-## Prepare another release
+## Label-conflict policy
 
-Never copy the local working directory wholesale. Export into a new empty staging directory:
+All eligible tweets (non-empty, at least three tokens) are normalised before any duplicate is
+removed. Every group of identical normalised texts that carries more than one label is removed
+completely. Each remaining group keeps its first tweet. `data_prep.py` writes a row-level audit
+trail (`data/kaggle_group_audit_v3.csv`) that maps every eligible raw row to its group and decision.
 
-```bash
-python release_results.py --source results --destination release_staging/public_results --manifest data/kaggle_clean_v2.csv
-```
+## Privacy model of the DP runs
 
-This removes record/client fields and derives aggregate confusion matrices when a local
-manifest is supplied. It is a content-minimization step, not a DP mechanism or a guarantee
-of anonymity. Run the content check on the complete clean staging snapshot before upload.
-The ignore file does not remove files that were previously tracked or published.
+Zero-out adjacency with fixed public client capacities: neighbouring datasets differ in one
+record slot of one client, which holds a real record in one and a null record (zero gradient)
+in the other. Sampling and noise use the OS CSPRNG; floating-point Gaussian sampling is not
+hardened against precision attacks. Client partitions are drawn from labels for simulation only.
 
 ## License and citation
 
-Code and released aggregate results use the MIT License. Author attribution is in `LICENSE`
-and `CITATION.cff`. No publication DOI, journal acceptance or public repository address is claimed.
+MIT License (`LICENSE`). Citation metadata is in `CITATION.cff`.

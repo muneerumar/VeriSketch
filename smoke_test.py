@@ -7,6 +7,7 @@ import fl, secagg as sa
 from exp import BASE
 assert subprocess.run([sys.executable, "test_secagg.py"]).returncode == 0
 assert subprocess.run([sys.executable, "test_dp.py"]).returncode == 0
+assert subprocess.run([sys.executable, "test_protocol.py"]).returncode == 0
 d = load_kaggle("cls"); Xtr, ytr = d["train"]
 cfg = dict(BASE); cfg.update(json.load(open(CONFIG_FILE)))
 cfg.update(seed=0, agg="verisketch", T=3, eval_every=3, eval_test=False, _record_params=True,

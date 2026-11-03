@@ -26,3 +26,11 @@ err_sum = max((a - b).abs().max().item() for a, b in zip(mine, ref_sum))
 print(f"max |per-example norm - autograd| = {err_norm:.2e};  max |clipped-sum - autograd| = {err_sum:.2e}")
 assert err_norm < 1e-4 and err_sum < 1e-4
 print("DP-SGD per-example gradient/clipping check passed")
+
+# DP noise source: OSRandom normals and Poisson sampling have the intended moments
+rs = fl.OSRandom()
+z = rs.normal((400000,)).numpy()
+assert abs(z.mean()) < 0.01 and abs(z.std() - 1) < 0.01, "OSRandom normal moments"
+m = rs.poisson_mask(200000, 0.05).float().mean().item()
+assert abs(m - 0.05) < 0.003, "Poisson sampling rate"
+print("DP noise source check passed")

@@ -2,13 +2,13 @@
 from pathlib import Path
 import argparse,csv,json,statistics,math
 
-GROUPS=('baseline','robust','joint','dp','elsa','fsweep','sketchdim','nullspace')
+GROUPS=('baseline','robust','joint','dpctl','dp','elsa','fsweep','sketchdim','nullspace')
 def summarize(root):
     groups={};checked=0
     for group in GROUPS:
         for p in sorted((Path(root)/group).glob('*.json')):
             o=json.loads(p.read_text());c=o['cfg'];t=o['test']
-            if o.get('release_schema')!='aggregate-only-v1':raise ValueError('Unexpected result schema: '+str(p))
+            if o.get('release_schema')!='aggregate-only-v2':raise ValueError('Unexpected result schema: '+str(p))
             cm=t.get('confusion')
             if cm:
                 n=sum(map(sum,cm));C=len(cm);den=[sum(cm[i])+sum(r[i] for r in cm) for i in range(C)]
@@ -20,7 +20,7 @@ def summarize(root):
                     if abs(v-t[k])>1e-10:raise ValueError('Metric does not match confusion matrix: '+str(p))
                 checked+=1
             key=(group,c['agg'] if c['K']>1 else 'central',str(c['partition']),c.get('attack','none'),
-                 str((c.get('dp') or {}).get('epsilon','none')))
+                 ('none' if not c.get('dp') else ('sigma0' if c['dp'].get('epsilon') is None else str(c['dp']['epsilon']))))
             groups.setdefault(key,[]).append(t)
     rows=[]
     for key,values in sorted(groups.items()):

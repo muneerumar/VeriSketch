@@ -1,60 +1,94 @@
-"""Cost of one complete protocol round, timed end to end.
+"""Cost of complete simulated protocol rounds (single process, all parties in one address space).
 
-For the 12,406-parameter head and synthetic dimensions, a complete VeriSketch round (masking,
-transcript and receipts, sketch release, owner checks, filtering, single mask-sum release,
-unmasking, commitment, challenge, shares, verification, range and sketch checks) is timed
-with SecureRound.run.  Key setup (X25519 key generation and agreement) is timed separately.
-Communication is counted message by message; peak RSS is recorded."""
-import os, time, json, resource, numpy as np, torch
+For each configuration a fresh subprocess times REPS complete rounds of VeriSketch and, as the matched
+comparator, of SecAgg-FedAvg with the same masking, transcript, release, commitment and challenge
+(SecureRound.run with mode "secagg"); the difference is the incremental cost of sketching and filtering.
+Key setup (X25519 key generation and agreement) is timed separately.  Peak RSS is measured per
+subprocess, so configurations do not share a high-water mark.  Communication is an explicit message
+ledger (8-byte field elements).  Usage: python bench.py  (or python bench.py --one d K rows width kappa)."""
+import os, sys, time, json, platform, resource, subprocess, numpy as np, torch
 from common import *
 import fl, secagg as sa
 
-
-def comm(d, K, r, w, kappa=1):
-    """Bytes per round (field elements are sent as 8-byte words; one-time setup listed separately)."""
-    tr = K * (8 + 8 + 32)                                   # transcript: id, public weight, upload hash per client
-    c = dict(client_to_AS_upload_B=d * 8, client_to_AN_seed_B=32, client_to_AS_shares_B=8 * kappa,
-             AS_to_client_B=tr + r * w * 8 + d * 8 + 32 * 4,  # transcript, own sketch, aggregate, commitment + coin shares
-             AN_to_AS_mask_sketches_B=K * r * w * 8, AN_to_AS_mask_sum_B=d * 8, AN_coins_B=4 * 32,
-             model_download_per_client_B=d * 4, setup_public_keys_per_client_B=32 * (K - 1))
-    c["total_round_B"] = (K * (c["client_to_AS_upload_B"] + 32 + c["client_to_AS_shares_B"] + c["AS_to_client_B"])
-                          + c["AN_to_AS_mask_sketches_B"] + c["AN_to_AS_mask_sum_B"] + c["AN_coins_B"])
-    c["plaintext_fedavg_round_B"] = K * d * 4 * 2
-    return c
+REPS = int(os.environ.get("BENCH_REPS", 20))
 
 
-def bench(d, K=10, reps=3, rows=4, width=64, kappa=1):
+def ledger(d, K, r, w, kappa=1, T=30, verisketch=True):
+    """Bytes per round per message type (A = all K clients accepted)."""
+    tr = K * (8 + 8 + 32)                                         # transcript entry: id, public weight, upload hash
+    L = dict(
+        client_to_AS_masked_upload=K * d * 8,
+        client_to_AN_mask_seed=K * 32,
+        AS_to_client_transcript_and_digest=K * (tr + 32),
+        client_to_AS_receipt_ack=K * 32,
+        AN_to_AS_coin_commitments=2 * 32,
+        AS_to_AN_digest_and_coin_shares=32 + 2 * 32,
+        AN_to_AS_coin_openings=2 * 32,
+        AN_to_AS_mask_sketches=(K * r * w * 8 if verisketch else 0),
+        AS_to_client_own_sketch=(K * r * w * 8 if verisketch else 0),
+        AS_to_AN_accepted_set=8 * K + 32,
+        AN_to_AS_mask_sum=d * 8,
+        AS_to_client_commitment_and_challenge_seed=K * (32 + 32 + 32),
+        client_to_AS_shares=K * 8 * kappa,
+        AS_to_client_aggregate_broadcast=K * d * 8,               # clients update the model from this broadcast;
+    )                                                             # no separate model download is sent
+    L["total_round_B"] = sum(L.values())
+    L["setup_public_keys_once_B"] = K * 32 * (K - 1)
+    L["setup_amortised_per_round_B"] = L["setup_public_keys_once_B"] / T
+    L["plaintext_fedavg_round_B"] = K * d * 4 * 2                 # float32 upload + model download
+    return L
+
+
+def one(d, K, rows, width, kappa):
     rng = np.random.default_rng(0)
     ups = [torch.tensor(rng.normal(0, 1, d) / np.sqrt(d) * 1.5, dtype=torch.float32) for _ in range(K)]
     n = [float(rng.integers(2000, 4000)) for _ in range(K)]
-    t = time.time(); sec = fl.SecureRound(K, rows, width); t_setup = time.time() - t
-    times, parts = [], []
-    for rep in range(reps):
-        t = time.time(); agg, st = sec.run(ups, n, rep + 1, "verisketch", 3, 2.0, kappa=kappa); times.append(time.time() - t)
-        assert agg is not None
-        parts.append({k: st[k] for k in ("t_client_mask", "t_sketch", "t_unmask", "t_verify")})
-    t = time.time(); _ = torch.stack(ups).mean(0); t_plain = time.time() - t
-    return dict(d=d, K=K, rows=rows, width=width, setup_s=t_setup, round_s_median=float(np.median(times)),
-                round_s_all=times, components_median={k: float(np.median([p[k] for p in parts])) for k in parts[0]},
-                plaintext_mean_s=t_plain, peak_rss_MB=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024,
-                kappa=kappa, **comm(d, K, rows, width, kappa))
+    t = time.perf_counter(); sec_v = fl.SecureRound(K, rows, width); t_setup = time.perf_counter() - t
+    sec_s = fl.SecureRound(K, rows, width)
+    tv, ts, parts = [], [], []
+    for rep in range(REPS + 1):                                    # first repetition is warm-up
+        t = time.perf_counter(); a, st = sec_v.run(ups, n, rep + 1, "verisketch", 3, 2.0, kappa=kappa); dt_v = time.perf_counter() - t
+        t = time.perf_counter(); b, _ = sec_s.run(ups, n, rep + 1, "secagg", 3, 2.0, kappa=kappa); dt_s = time.perf_counter() - t
+        assert a is not None and b is not None
+        if rep: tv.append(dt_v); ts.append(dt_s); parts.append({k: st[k] for k in ("t_client_mask", "t_sketch", "t_unmask", "t_verify")})
+    U = torch.stack(ups); t = time.perf_counter()
+    for _ in range(REPS): (U * torch.tensor(n)[:, None]).sum(0) / sum(n)
+    t_plain = (time.perf_counter() - t) / REPS
+    q = lambda x: dict(median=float(np.median(x)), q25=float(np.percentile(x, 25)), q75=float(np.percentile(x, 75)),
+                       min=float(np.min(x)), max=float(np.max(x)))
+    inc = np.array(tv) - np.array(ts)
+    rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    rss_mib = rss / 1024 if sys.platform.startswith("linux") else rss / 2 ** 20      # Linux: KiB; macOS: bytes
+    return dict(d=d, K=K, rows=rows, width=width, kappa=kappa, reps=REPS, setup_s=t_setup,
+                verisketch_round_s=q(tv), secagg_round_s=q(ts), incremental_s=q(inc),
+                components_median={k: float(np.median([p[k] for p in parts])) for k in parts[0]},
+                plaintext_mean_s=t_plain, peak_rss_MiB=rss_mib, ledger_verisketch=ledger(d, K, rows, width, kappa),
+                ledger_secagg=ledger(d, K, rows, width, kappa, verisketch=False))
 
 
 def confidentiality(d=12406, n_trials=20):
-    rng = np.random.default_rng(1); r_field, r_float = [], []
+    rng = np.random.default_rng(1); r_field = []
     for _ in range(n_trials):
         u = rng.normal(0, 1, d) / np.sqrt(d) * 1.5
         x = sa.fadd(sa.encode(u, 2.0), sa.prg_field(os.urandom(32), d))
         r_field.append(abs(np.corrcoef(sa.to_signed(x).astype(float), u)[0, 1]))
-        uw = u * 3267                                          # earlier implementation: weighted update + N(0,1)*1e-3
-        xf = uw + rng.normal(0, 1.0, d) * 0.001
-        r_float.append(np.corrcoef(xf, uw)[0, 1]); rel = np.linalg.norm(xf - uw) / np.linalg.norm(uw)
-    return dict(field_abs_corr_mean=float(np.mean(r_field)), field_abs_corr_max=float(np.max(r_field)),
-                float_corr_mean=float(np.mean(r_float)), float_relative_mask_norm=float(rel))
+    return dict(field_abs_corr_mean=float(np.mean(r_field)), field_abs_corr_max=float(np.max(r_field)))
 
 
 if __name__ == "__main__":
-    res = dict(confidentiality=confidentiality(), scaling=[bench(d) for d in (12406, 595206, 2_000_000)],
-               scaling_K=[bench(12406, K=k) for k in (5, 10, 20)], scaling_sketch=[bench(12406, rows=4, width=256)], scaling_kappa=[bench(12406, kappa=2)])
-    print(json.dumps(res, indent=1)[:3000])
+    if len(sys.argv) > 1 and sys.argv[1] == "--one":
+        print(json.dumps(one(*[int(x) for x in sys.argv[2:7]]))); sys.exit(0)
+    cfgs = [(12406, 10, 4, 64, 1), (595206, 10, 4, 64, 1), (2_000_000, 10, 4, 64, 1),
+            (12406, 5, 4, 64, 1), (12406, 20, 4, 64, 1), (12406, 10, 4, 256, 1), (12406, 10, 4, 64, 2)]
+    runs = []
+    for c in cfgs:
+        r = subprocess.run([sys.executable, __file__, "--one", *map(str, c)], capture_output=True, text=True, check=True)
+        runs.append(json.loads(r.stdout.strip().splitlines()[-1])); print(c, runs[-1]["verisketch_round_s"]["median"],
+                                                                       runs[-1]["secagg_round_s"]["median"], flush=True)
+    cpu = ""
+    try: cpu = next(l.split(":", 1)[1].strip() for l in open("/proc/cpuinfo") if l.startswith("model name"))
+    except Exception: pass
+    res = dict(platform=dict(system=platform.platform(), python=platform.python_version(), torch=torch.__version__,
+                             cpu=cpu, cores=os.cpu_count(), torch_threads=torch.get_num_threads()),
+               note="single-process simulation of all parties; no network", confidentiality=confidentiality(), runs=runs)
     save_json(res, os.path.join(RES, "bench", "bench.json"))

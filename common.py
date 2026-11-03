@@ -6,16 +6,24 @@ CONFIG_FILE = os.path.join(ROOT, "config", "defaults.json")
 
 
 def public_stats(corpus, feat="cls"):
-    """Standardisation statistics from an unrelated PUBLIC corpus (no private data used)."""
+    """Standardisation statistics from the TRAINING split of an unrelated public corpus.
+    Kaggle models use HateXplain-train statistics, HateXplain models use Kaggle-train statistics,
+    so no validation or test features of either corpus enter the normaliser."""
     X = np.load(os.path.join(ROOT, "features", f"{corpus}_{feat}.npy"))
+    if corpus == "hx":
+        hx = pd.read_json(os.path.join(ROOT, "data", "hatexplain_clean.jsonl"), lines=True)
+        X = X[hx.split.values == "train"]
+    else:
+        df = pd.read_csv(os.path.join(ROOT, "data", "kaggle_clean_v3.csv"))
+        X = X[df.v1_index.values[df.split.values == "train"]]
     return X.mean(0), X.std(0) + 1e-6
 
 
-def load_kaggle(feat="cls", standardize=True, version=2):
-    if version == 2:
-        df = pd.read_csv(os.path.join(ROOT, "data", "kaggle_clean_v2.csv"))
+def load_kaggle(feat="cls", standardize=True, version=3):
+    if version == 3:
+        df = pd.read_csv(os.path.join(ROOT, "data", "kaggle_clean_v3.csv"))
         X = np.load(os.path.join(ROOT, "features", f"kaggle_{feat}.npy"))[df.v1_index.values]
-        mu, sd = public_stats("hx", feat)                     # statistics of HateXplain (public, disjoint)
+        mu, sd = public_stats("hx", feat)                     # HateXplain training split (public, disjoint)
         if standardize: X = (X - mu) / sd
         y = df.label.values; out = {}
         for s in ("train", "val", "test"):
@@ -48,7 +56,7 @@ def load_kaggle_v1(feat="cls", standardize=True):
 def load_hx(feat="cls", standardize=True):
     hx = pd.read_json(os.path.join(ROOT, "data", "hatexplain_clean.jsonl"), lines=True)
     X = np.load(os.path.join(ROOT, "features", f"hx_{feat}.npy")); y = hx.label.values
-    mu, sd = public_stats("kaggle", feat)                      # statistics of the (public) Kaggle corpus
+    mu, sd = public_stats("kaggle", feat)                      # Kaggle training split (public, disjoint)
     if standardize: X = (X - mu) / sd
     out = {s: (torch.tensor(X[hx.split.values == s], dtype=torch.float32),
                torch.tensor(y[hx.split.values == s], dtype=torch.long)) for s in ("train", "val", "test")}

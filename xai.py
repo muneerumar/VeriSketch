@@ -4,8 +4,8 @@ Three independently trained federated heads per privacy level; explanations of t
 fixed stratified sample of posts for every model; Integrated Gradients (32 steps) with
 gradient x input and random baselines; token-F1 at the oracle rationale length and at a
 fixed budget estimated on the validation split; predicted-class explanations and, for one
-seed, gold-class explanations; completeness residuals; a 32/64/128-step stability check;
-a truncation audit.  The public analyze.py summarizes aggregate results."""
+seed, gold-class explanations; completeness residuals; a 32/64/128-step stability check (40 posts, one non-private and one eps=2 model);
+a truncation audit.  The statistical analysis is in analyze.py."""
 import os, sys, json, time
 import numpy as np, pandas as pd, torch
 from sklearn.metrics import average_precision_score
@@ -146,23 +146,27 @@ def main():
     for eps in order:
         for s in SEEDS[:3]:
             tag = f"eps{eps if eps else 'inf'}_s{s}"
-            pth = os.path.join(OUT, tag + "_cls.json")
-            if not os.path.exists(pth):
+            pth, hp = os.path.join(OUT, tag + "_cls.json"), os.path.join(OUT, tag + "_head.pt")
+            # checkpoint group: the head weights and the classification record are written together;
+            # if either is missing, both are regenerated
+            if not (os.path.exists(pth) and os.path.exists(hp)):
                 c = dict(BASE); c.update(cfgb); c.update(seed=s, agg="secagg", partition="iid", clip_update=cfgb["clip_update"])
                 if eps: c["lr"] = cfgb["dp_lr"]; c["dp"] = dict(epsilon=eps, delta=1e-5, clip=cfgb["dp_clip"], q=cfgb["dp_q"])
                 out, head, pred, prob = fl.run_fl(c, *d["train"], *d["val"], *d["test"], log=lambda *a: None)
-                torch.save(head.params(), os.path.join(OUT, tag + "_head.pt")); save_json(out, pth)
+                torch.save(head.params(), hp + ".tmp"); os.replace(hp + ".tmp", hp); save_json(out, pth)
+                for f in (tag + "_xai.csv",): 
+                    if os.path.exists(os.path.join(OUT, f)): os.remove(os.path.join(OUT, f))   # stale explanations
                 print(tag, out["test"]["macro_f1"], flush=True)
-            xp = os.path.join(OUT, tag + "_xai.csv")
-            if os.path.exists(xp) or os.path.exists(xp + ".lock"): continue
-            open(xp + ".lock", "w").close()
-            head = fl.Head(768, cfgb["d_hidden"], 3, 0); head.W1, head.b1, head.W2, head.b2 = torch.load(os.path.join(OUT, tag + "_head.pt"))
+            head = fl.Head(768, cfgb["d_hidden"], 3, 0); head.W1, head.b1, head.W2, head.b2 = torch.load(hp)
             model = FullModel(enc, head, mu, sd)
-            res = evaluate(model, tok, ev, budget, np.random.default_rng(s), gold_too=(s == SEEDS[0]))
-            res.to_csv(xp, index=False); os.remove(xp + ".lock")
-            print(tag, "done", res[["pred_ig_tf1_oracle", "pred_ig_tf1_budget", "comprehensiveness"]].mean().round(4).to_dict(), flush=True)
-            if s == SEEDS[0] and eps is None:
-                step_stability(model, tok, ev).to_csv(os.path.join(OUT, "ig_step_stability.csv"), index=False)
+            xp = os.path.join(OUT, tag + "_xai.csv")
+            if not os.path.exists(xp):
+                res = evaluate(model, tok, ev, budget, np.random.default_rng(s), gold_too=(s == SEEDS[0]))
+                res.to_csv(xp + ".tmp", index=False); os.replace(xp + ".tmp", xp)
+                print(tag, "done", res[["pred_ig_tf1_oracle", "pred_ig_tf1_budget", "comprehensiveness"]].mean().round(4).to_dict(), flush=True)
+            sp = os.path.join(OUT, f"ig_step_stability_{tag}.csv")
+            if s == SEEDS[0] and eps in (None, 2.0) and not os.path.exists(sp):
+                step_stability(model, tok, ev).to_csv(sp, index=False)
 
 
 if __name__ == "__main__":

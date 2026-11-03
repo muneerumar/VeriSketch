@@ -5,7 +5,7 @@ counts above thresholds; the per-post maximum is saved for the sensitivity analy
 import os, json, numpy as np, pandas as pd
 from sklearn.feature_extraction.text import TfidfVectorizer
 from common import ROOT, RES, save_json
-df = pd.read_csv(os.path.join(ROOT, "data", "kaggle_clean_v2.csv"))
+df = pd.read_csv(os.path.join(ROOT, "data", "kaggle_clean_v3.csv"))
 te = df[df.split == "test"].reset_index(drop=True); tr = df[df.split != "test"].reset_index(drop=True)
 vec = TfidfVectorizer(ngram_range=(1, 2), min_df=1, sublinear_tf=True).fit(df.key.fillna(""))
 A = vec.transform(te.key.fillna("")); B = vec.transform(tr.key.fillna("")).T.tocsc()
